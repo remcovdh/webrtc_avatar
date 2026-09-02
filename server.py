@@ -6,6 +6,7 @@ prepared, audio and video are paced together over a persistent WebRTC session.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -23,8 +24,11 @@ from typing import Any
 import cv2
 import httpx
 import numpy as np
-import onnxruntime as ort
+
+# Import torch before ONNX Runtime so ORT can reuse the CUDA 12 / cuDNN 9
+# libraries shipped with the PyTorch image.
 import torch
+import onnxruntime as ort
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -60,6 +64,12 @@ TTS_INSTRUCTION = os.getenv(
 TTS_CFG_SCALE = float(os.getenv("BREEZE_CFG_SCALE", "4"))
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
+AVATAR_PASTE_BACK = os.getenv("AVATAR_PASTE_BACK", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 VIDEO_FPS = 30
 AUDIO_RATE = 48_000
 AUDIO_SAMPLES = 960  # 20 ms at 48 kHz
@@ -68,6 +78,12 @@ pcs: set[RTCPeerConnection] = set()
 pipeline: GradioLivePortraitPipeline | None = None
 startup_error: str | None = None
 inference_lock = asyncio.Lock()
+
+# JoyVASA's official motion checkpoint stores its configuration as an
+# argparse.Namespace. PyTorch 2.6+ blocks that class by default when loading
+# weights. Allowlist only this known, inert configuration container while
+# retaining weights_only=True for every other checkpoint global.
+torch.serialization.add_safe_globals([argparse.Namespace])
 
 
 def _letterbox(image: np.ndarray, size: int = 512) -> np.ndarray:
@@ -105,8 +121,20 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     if not CONFIG_PATH.is_file():
         raise FileNotFoundError(f"FasterLivePortrait config missing: {CONFIG_PATH}")
 
+    LOG.info(
+        "Runtime: torch=%s torch_cuda=%s onnxruntime=%s providers=%s",
+        torch.__version__,
+        torch.version.cuda,
+        ort.__version__,
+        ort.get_available_providers(),
+    )
+
     cfg = OmegaConf.load(CONFIG_PATH)
-    cfg.infer_params.flag_pasteback = True
+    # Paste-back invokes torchgeometry's GPU matrix inverse for every frame.
+    # On memory-constrained GPUs shared with TTS, cuSOLVER handle creation can
+    # fail even though motion generation succeeded. The crop output already
+    # contains the complete animated face and is the better WebRTC default.
+    cfg.infer_params.flag_pasteback = AVATAR_PASTE_BACK
     cfg.infer_params.flag_relative_motion = False
     cfg.infer_params.flag_stitching = True
     cfg.infer_params.animation_region = "all"
@@ -255,8 +283,13 @@ def _render_animation(wav_path: Path, output_dir: Path) -> tuple[list[np.ndarray
     if pipeline is None:
         raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
 
-    video_path, _crop_path, _elapsed = pipeline.run_audio_driving(
+    original_path, crop_path, _elapsed = pipeline.run_audio_driving(
         str(wav_path), str(AVATAR_PATH), save_dir=str(output_dir)
+    )
+    video_path = original_path if AVATAR_PASTE_BACK else crop_path
+    LOG.info(
+        "Using %s animation output",
+        "full-frame paste-back" if AVATAR_PASTE_BACK else "face crop",
     )
     capture = cv2.VideoCapture(str(video_path))
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
@@ -367,8 +400,12 @@ async def health() -> JSONResponse:
         "avatar_ready": startup_error is None,
         "tts_ready": tts_ready,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "torch_version": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "onnxruntime_version": ort.__version__,
         "onnx_providers": providers,
         "cuda_provider": "CUDAExecutionProvider" in providers,
+        "paste_back": AVATAR_PASTE_BACK,
         "error": startup_error,
     }
     return JSONResponse(body, status_code=200 if body["ok"] else 503)
