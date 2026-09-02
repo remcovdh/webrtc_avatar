@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neural Avatar Lab</title>
+  <style>
+    :root { color-scheme:dark; --ink:#f4f5f7; --muted:#9da7b3; --line:#2b323b; --accent:#7c5cff; --good:#38c793; --bad:#ff6b78; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:radial-gradient(circle at 50% 0,#24203e 0,#0b0d11 48%); color:var(--ink); font:15px/1.45 Inter,ui-sans-serif,system-ui,sans-serif; }
+    main { width:min(100%,920px); display:grid; grid-template-columns:minmax(280px,512px) minmax(260px,1fr); gap:22px; }
+    .stage,.panel { border:1px solid var(--line); border-radius:18px; background:rgba(21,25,31,.92); box-shadow:0 24px 80px #0008; overflow:hidden; }
+    .stage { position:relative; aspect-ratio:1; background:#050608; }
+    video { display:block; width:100%; height:100%; object-fit:contain; }
+    .badge { position:absolute; top:14px; left:14px; padding:7px 10px; border:1px solid #ffffff1f; border-radius:999px; background:#090b0dcc; color:var(--muted); font-size:12px; backdrop-filter:blur(10px); }
+    .panel { padding:24px; display:flex; flex-direction:column; gap:17px; }
+    h1 { margin:0; font-size:25px; letter-spacing:-.03em; }
+    .lede { margin:-8px 0 2px; color:var(--muted); }
+    label { display:grid; gap:7px; color:#cdd3da; font-size:13px; }
+    textarea,input { width:100%; border:1px solid var(--line); border-radius:10px; background:#0d1015; color:var(--ink); padding:11px 12px; font:inherit; outline:none; resize:vertical; }
+    textarea:focus,input:focus { border-color:var(--accent); box-shadow:0 0 0 3px #7c5cff26; }
+    textarea { min-height:110px; }
+    button { border:0; border-radius:10px; padding:12px 14px; background:var(--accent); color:white; font:700 14px inherit; cursor:pointer; }
+    button.secondary { background:#252b34; }
+    button:disabled { cursor:not-allowed; opacity:.48; }
+    .actions { display:grid; grid-template-columns:1fr auto; gap:9px; }
+    #status { min-height:44px; padding:11px 12px; border:1px solid var(--line); border-radius:10px; color:var(--muted); background:#0d1015; }
+    #status.good { color:var(--good); border-color:#38c79355; }
+    #status.bad { color:var(--bad); border-color:#ff6b7855; }
+    .details { color:var(--muted); font-size:12px; }
+    @media (max-width:760px) { main { grid-template-columns:1fr; max-width:512px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="stage" aria-label="Avatar video">
+      <video id="avatarVideo" autoplay playsinline muted></video>
+      <div class="badge" id="connectionBadge">Connecting…</div>
+    </section>
+    <section class="panel">
+      <h1>Neural Avatar Lab</h1>
+      <p class="lede">Breeze TTS 2 · JoyVASA · FasterLivePortrait · WebRTC</p>
+      <label>Speech<textarea id="textInput" maxlength="500">Hello! This is my first neural streaming avatar test.</textarea></label>
+      <label>Voice direction<input id="instructionInput" value="A warm, clear, natural voice with a calm conversational delivery."></label>
+      <div class="actions">
+        <button id="sendBtn" disabled>Generate &amp; speak</button>
+        <button id="audioBtn" class="secondary">Enable audio</button>
+      </div>
+      <div id="status" role="status" aria-live="polite">Checking the server…</div>
+      <div class="details">The neural motion pass is prepared before synchronized WebRTC playback begins.</div>
+    </section>
+  </main>
+  <script>
+    const video = document.querySelector("#avatarVideo");
+    const statusBox = document.querySelector("#status");
+    const badge = document.querySelector("#connectionBadge");
+    const textInput = document.querySelector("#textInput");
+    const instructionInput = document.querySelector("#instructionInput");
+    const sendBtn = document.querySelector("#sendBtn");
+    const audioBtn = document.querySelector("#audioBtn");
+    let pc, channel, completionTimer;
+    const stream = new MediaStream();
+    video.srcObject = stream;
+
+    function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
+    function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
+    async function waitForIceGathering(peer) {
+      if (peer.iceGatheringState === "complete") return;
+      await new Promise(resolve => {
+        const check = () => {
+          if (peer.iceGatheringState === "complete") {
+            peer.removeEventListener("icegatheringstatechange", check); resolve();
+          }
+        };
+        peer.addEventListener("icegatheringstatechange", check);
+      });
+    }
+
+    async function connect() {
+      try {
+        const health = await fetch("/health");
+        const healthBody = await health.json();
+        if (!health.ok) throw new Error(healthBody.error || "Models are not ready");
+        const config = await fetch("/client-config").then(response => response.json());
+        pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
+        channel = pc.createDataChannel("avatar-control");
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("audio", { direction: "recvonly" });
+        pc.ontrack = event => {
+          if (!stream.getTracks().some(track => track.id === event.track.id)) stream.addTrack(event.track);
+          video.play().catch(() => {});
+        };
+        pc.onconnectionstatechange = () => {
+          badge.textContent = pc.connectionState;
+          if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+            setReady(false); setStatus(`WebRTC ${pc.connectionState}`, "bad");
+          }
+        };
+        channel.onopen = () => { badge.textContent = "connected"; setReady(true); };
+        channel.onmessage = event => {
+          let message;
+          try { message = JSON.parse(event.data); }
+          catch { message = { type:"status", message:String(event.data) }; }
+          if (message.type === "error") {
+            clearTimeout(completionTimer); setReady(true); setStatus(message.message || "Generation failed", "bad");
+          } else if (message.type === "ready") {
+            setReady(true);
+          } else if (message.type === "playing") {
+            setStatus(message.message || "Playing…", "good");
+            const delay = Math.max(500, Number(message.duration || 0) * 1000 + 500);
+            completionTimer = setTimeout(() => setReady(true), delay);
+          } else {
+            setStatus(message.message || "Working…");
+          }
+        };
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGathering(pc);
+        const response = await fetch("/offer", {
+          method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(pc.localDescription),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        await pc.setRemoteDescription(await response.json());
+      } catch (error) {
+        badge.textContent = "offline"; setStatus(error.message, "bad");
+      }
+    }
+
+    function sendText() {
+      const text = textInput.value.trim();
+      if (!text || channel?.readyState !== "open") return;
+      clearTimeout(completionTimer); sendBtn.disabled = true; setStatus("Request sent…");
+      channel.send(JSON.stringify({ text, instruction:instructionInput.value.trim() }));
+    }
+    sendBtn.addEventListener("click", sendText);
+    textInput.addEventListener("keydown", event => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") sendText();
+    });
+    audioBtn.addEventListener("click", async () => {
+      video.muted = false;
+      try { await video.play(); audioBtn.textContent = "Audio enabled"; audioBtn.disabled = true; }
+      catch (error) { setStatus(`Could not enable audio: ${error.message}`, "bad"); }
+    });
+    window.addEventListener("beforeunload", () => pc?.close());
+    connect();
+  </script>
+</body>
+</html>

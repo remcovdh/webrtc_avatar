@@ -1,0 +1,8 @@
+checkpoints
+models
+results
+inputs
+__pycache__
+*.py[cod]
+.git
+.DS_Store

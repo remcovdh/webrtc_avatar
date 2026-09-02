@@ -1,0 +1,73 @@
+name: neural-avatar-test
+
+x-avatar-build: &avatar-build
+  context: .
+  dockerfile: Dockerfile
+  target: avatar
+
+x-model-volumes: &model-volumes
+  - ./checkpoints:/workspace/FasterLivePortrait/checkpoints
+  - ./models:/workspace/models
+
+services:
+  model-init:
+    build: *avatar-build
+    image: neural-avatar:latest
+    command: ["download"]
+    volumes: *model-volumes
+    restart: "no"
+
+  breeze-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: breeze
+    image: neural-avatar-breeze:latest
+    command: ["tts"]
+    network_mode: host
+    gpus: all
+    shm_size: 4gb
+    volumes:
+      - ./models:/workspace/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:7860/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    restart: unless-stopped
+
+  webrtc-avatar:
+    build: *avatar-build
+    image: neural-avatar:latest
+    command: ["serve"]
+    container_name: avatar_webrtc_studio
+    network_mode: host
+    gpus: all
+    ipc: host
+    shm_size: 8gb
+    environment:
+      BREEZE_TTS_URL: http://127.0.0.1:7860
+      AVATAR_PATH: /workspace/inputs/avatar.jpg
+      FLP_CONFIG_PATH: /workspace/FasterLivePortrait/configs/onnx_infer.yaml
+      # For remote/NAT clients, set a TURN server JSON array here.
+      ICE_SERVERS_JSON: "[]"
+    volumes:
+      - ./inputs:/workspace/inputs:ro
+      - ./checkpoints:/workspace/FasterLivePortrait/checkpoints:ro
+      - ./results:/workspace/results
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      breeze-tts:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    restart: unless-stopped
