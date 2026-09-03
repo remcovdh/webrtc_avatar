@@ -59,6 +59,9 @@ services:
       # v2B bypasses FLP's temporary pickle, two MP4 files, two FFmpeg muxes
       # and the final OpenCV decode. Set false for an immediate v2A.1 rollback.
       DIRECT_MEMORY_RENDER: "true"
+      # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
+      # rendered frame for the skipped interval. Set 1 for full v2B quality.
+      RENDER_STRIDE: "2"
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"

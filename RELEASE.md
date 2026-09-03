@@ -1,52 +1,49 @@
-# neural-avatar-v2b-direct-memory
+# neural-avatar-v2c-a-render-stride
 
 ## Purpose
 
-Measure and remove the file/codec transport overhead between JoyVASA,
-FasterLivePortrait and the existing WebRTC queue without changing neural model
-settings or output-frame selection.
+Measure the latency and visual-quality effect of rendering alternating JoyVASA
+motion frames after v2B proved that neural frame inference is the sustained
+bottleneck.
 
 ## Changed
 
-- Added a direct renderer that calls JoyVASA `gen_motion_sequence` and
-  FasterLivePortrait `run_with_pkl` for each phrase in memory.
-- Bypassed the motion pickle, crop/original MP4 encodes, two FFmpeg audio muxes
-  and final OpenCV MP4 decode when the direct backend is active.
-- Retained the complete v2A.1 renderer as `legacy-mp4`.
-- Added `DIRECT_MEMORY_RENDER=true` to Compose as a reversible runtime switch.
-- Direct mode automatically falls back to the legacy path when paste-back is
-  enabled.
-- Added render backend, JoyVASA motion time, FasterLivePortrait frame-loop time
-  and effective frame FPS to logs, WebRTC metrics and the browser table.
-- Added renderer selection to `/health` and changed `server_build` to the unique
-  v2B identifier.
-- Added Docker build assertions for the upstream APIs used by direct mode.
-- Recorded the supplied v2A.1 benchmark, interpretation, v2B test procedure,
-  acceptance criteria, decision and rollback in `README.md`.
+- Added `RENDER_STRIDE`, default `2`, to direct-memory rendering.
+- Rendered motion indices 0, 2, 4 and so on while assigning the resulting frame
+  list half the source FPS, preserving phrase duration and lip-sync timestamps.
+- Added configured/effective stride, rendered/original frame counts and playback
+  FPS to `/health`, logs, WebRTC metrics and the browser table.
+- Preserved exact v2B behavior when `RENDER_STRIDE=1`.
+- Preserved automatic stride one for the legacy MP4/paste-back path.
+- Recorded the complete supplied v2B timings and log conclusions.
+- Added a v2C-A benchmark procedure, predicted ranges, visual acceptance check,
+  decision record and rollback to `README.md`.
 
 ## Deliberately not changed
 
 - Phrase splitting thresholds and sequential phrase scheduling.
 - Breeze, JoyVASA or FasterLivePortrait model configuration.
-- The number of inferred source frames or their quality.
 - WebRTC's 30 FPS video and 48 kHz audio output.
 - Phrase-level batching: playback still waits for all frames in a phrase.
 - Paste-back remains disabled because of the earlier cuSOLVER failure.
+- No TTS prefetch, interpolation or incremental frame append is included.
 
 ## Expected result
 
-- `/health` reports `render_backend: direct-memory`.
-- UI rows report backend `direct-memory` and Decode `0 ms`.
-- No FFmpeg banner or phrase MP4 appears during an interactive request.
-- Pipeline time may decrease modestly; the approximately 11.2 FPS neural frame
-  loop remains the likely dominant bottleneck.
+- `/health` reports build `neural-avatar-v2c-a-render-stride`, backend
+  `direct-memory` and stride `2`.
+- A 16/76/66-frame test renders 8/38/33 neural frames at 12.5 playback FPS while
+  retaining 0.64/3.04/2.64-second media durations.
+- Frame-loop time should fall roughly 40–50%; visual smoothness must be judged
+  on the RTX 5080 before the change is accepted.
 
 ## Rollback
 
-Set `DIRECT_MEMORY_RENDER: "false"` under `webrtc-avatar.environment` and run:
+Set `RENDER_STRIDE: "1"` under `webrtc-avatar.environment` and run:
 
 ```bash
 docker compose up -d --force-recreate webrtc-avatar
 ```
 
-No rebuild is required for this runtime rollback.
+No rebuild is required. This restores v2B behavior while retaining direct
+memory. `DIRECT_MEMORY_RENDER=false` remains the deeper legacy-MP4 rollback.

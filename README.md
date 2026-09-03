@@ -1,12 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2b-direct-memory`
+Current build: `neural-avatar-v2c-a-render-stride`
 
-This archive is v2B of the latency optimization series. It retains the proven
-v2A.1 warm-up and phrase playback, then bypasses FasterLivePortrait's temporary
-motion pickle, crop/original MP4 files, two FFmpeg mux operations and final MP4
-decode. JoyVASA motion and rendered crop frames now pass directly through
-memory to the existing WebRTC playback buffer.
+This archive is v2C-A of the latency optimization series. It retains the proven
+v2B direct-memory renderer and adds a configurable render stride. The default
+stride of two renders alternating 25 FPS JoyVASA motion frames and preserves
+the original duration by holding each neural frame across its skipped interval.
+This deliberately trades some temporal detail for substantially less neural
+frame work. Set the stride to one for exact v2B behavior.
 
 This project is a working test of a browser-delivered talking avatar:
 
@@ -31,8 +32,9 @@ text -> phrase 1: TTS -> render -> playback starts
 This substantially improves time-to-first-speech for multi-sentence input. It
 is not yet frame-by-frame neural streaming: Breeze, JoyVASA and
 FasterLivePortrait still complete each phrase before that phrase is appended to
-playback. v2B removes file overhead and establishes a direct-frame baseline;
-incremental frame delivery is a later, separately measured change. If a later
+playback. v2C-A reduces the number of neural frames but still waits for the
+selected frames of a phrase before appending it. Incremental frame delivery is
+a later, separately measured change. If a later
 phrase takes longer to generate than the media already buffered, the client
 receives silence and holds the last video frame. That gap is measured as an
 underrun in the UI.
@@ -92,9 +94,10 @@ Expected progressive fields:
 
 ```json
 {
-  "server_build": "neural-avatar-v2b-direct-memory",
+  "server_build": "neural-avatar-v2c-a-render-stride",
   "render_backend": "direct-memory",
   "direct_memory_render": true,
+  "render_stride": 2,
   "startup_warmup_enabled": true,
   "startup_warmup_complete": true,
   "progressive_phrase_mode": true,
@@ -115,9 +118,8 @@ docker compose up -d breeze-tts
 docker compose up -d --force-recreate webrtc-avatar
 ```
 
-The Dockerfile is changed in v2B. It now checks that the moving
-FasterLivePortrait branch still exposes the direct-motion and direct-frame APIs
-used by `server.py`.
+The Dockerfile retains the v2B checks that the moving FasterLivePortrait branch
+still exposes the direct-motion and direct-frame APIs used by `server.py`.
 
 ## Optimization roadmap and current step
 
@@ -125,15 +127,17 @@ Changes are intentionally introduced and measured one step at a time:
 
 1. **v2A.1, complete:** wait for Breeze, then warm Breeze, HuBERT, JoyVASA and
    FasterLivePortrait; expose detailed TTS, pipeline and decode measurements.
-2. **v2B, this archive:** bypass the motion pickle, MP4/FFmpeg work and MP4
+2. **v2B, complete:** bypass the motion pickle, MP4/FFmpeg work and MP4
    decode; feed completed phrase frames directly into the WebRTC buffer.
-3. **v2C:** add configurable render stride and bounded TTS prefetch.
-4. **Later experiments:** test a Blackwell-compatible TensorRT path and Ditto
+3. **v2C-A, this archive:** render alternating motion frames with a configurable
+   stride and preserve media duration using frame holds.
+4. **v2C-B, only after measuring v2C-A:** test bounded TTS prefetch separately.
+5. **Later experiments:** test a Blackwell-compatible TensorRT path and Ditto
    online in separate containers.
 
-The order matters. v2A establishes a warm, repeatable baseline. v2B isolates
-file overhead. Only after measuring both should v2C deliberately trade temporal
-detail or GPU concurrency for lower gaps.
+The order matters. v2A establishes a warm baseline, v2B isolates file overhead,
+and v2C-A measures a deliberate temporal-quality tradeoff. TTS prefetch remains
+separate so GPU contention cannot be mistaken for a stride result.
 
 ## Startup warm-up configuration
 
@@ -161,6 +165,7 @@ STARTUP_WARMUP: "false"
 | --- | --- | --- |
 | `DIRECT_MEMORY_RENDER` | `true` | Uses JoyVASA motion and FasterLivePortrait crop frames directly in memory. |
 | `AVATAR_PASTE_BACK` | `false` | Required for the v2B direct path; avoids the unstable GPU paste-back operation. |
+| `RENDER_STRIDE` | `2` | Renders every second JoyVASA motion frame. Use `1` for full v2B temporal quality. |
 
 The direct backend removes these per-phrase operations:
 
@@ -187,7 +192,26 @@ docker compose up -d --force-recreate webrtc-avatar
 ```
 
 When `AVATAR_PASTE_BACK=true`, the server automatically uses `legacy-mp4`
-because v2B supports the crop path only.
+with an effective stride of one because direct-memory rendering supports the
+crop path only.
+
+### How render stride preserves timing
+
+At the default 25 FPS JoyVASA rate, an example 76-frame phrase represents 3.04
+seconds. With `RENDER_STRIDE=2`, v2C-A renders frames 0, 2, 4 … 74: 38 neural
+frames at an effective 12.5 FPS, still representing 3.04 seconds. The WebRTC
+queue then repeats/holds those frames while emitting its fixed 30 FPS stream.
+
+| Stride | Neural frames rendered | Effective animation rate | Expected effect |
+| ---: | ---: | ---: | --- |
+| `1` | 100% | 25 FPS | Exact v2B motion detail and rollback. |
+| `2` | about 50% | 12.5 FPS | v2C-A default; expected near-half frame-loop time. |
+| `3` | about 33% | 8.33 FPS | More speed but visibly less smooth; diagnostic only. |
+
+Stride does not change TTS, JoyVASA motion generation, lip-sync timestamps,
+audio duration, WebRTC's 30 FPS transport, or image resolution. It changes how
+many intermediate neural portrait frames are inferred. Compare lip sync,
+blinks, head motion and visual smoothness before accepting this tradeoff.
 
 ## Progressive phrase configuration
 
@@ -234,6 +258,7 @@ available in `server.py` or `entrypoint.sh`.
 | `FLP_CONFIG_PATH` | `/workspace/FasterLivePortrait/configs/onnx_infer.yaml` | FasterLivePortrait ONNX configuration. |
 | `RESULTS_ROOT` | `/workspace/results` | Temporary request output. Each phrase gets its own subdirectory. |
 | `DIRECT_MEMORY_RENDER` | `true` | Selects the v2B in-memory renderer; `false` selects the v2A.1 legacy MP4 path. |
+| `RENDER_STRIDE` | `2` | Neural-frame decimation used by direct memory. `1` restores full-frame v2B rendering. |
 | `STARTUP_WARMUP` | `true` | Moves lazy model initialization into container startup. |
 | `WARMUP_TEXT` | `Hello.` | Disposable phrase used by startup warm-up. |
 | `TTS_STARTUP_WAIT_SECONDS` | `300` | Readiness timeout used before startup warm-up. |
@@ -278,9 +303,12 @@ The browser adds one row when a phrase is ready:
 | TTS | Wall time spent waiting for Breeze to generate that phrase. |
 | First byte | Time from the TTS request until its first response-body byte. |
 | Backend | `direct-memory` for v2B or `legacy-mp4` for the rollback path. |
+| Stride | Interval between rendered JoyVASA motion frames. `2` renders frames 0, 2, 4 and so on. |
 | Motion | JoyVASA audio-to-motion time on the direct path. The legacy path reports zero because upstream exposes only its aggregate. |
 | Frame loop | Time spent calling FasterLivePortrait for all phrase frames. Legacy mode reports zero because upstream exposes only its aggregate. |
-| FPS | Effective FasterLivePortrait frame-loop throughput, not WebRTC's fixed 30 FPS output rate. Legacy mode reports zero. |
+| Neural FPS | Effective FasterLivePortrait compute throughput, not the animation or WebRTC rate. Legacy mode reports zero. |
+| Frames | Rendered neural frames divided by original JoyVASA motion frames. |
+| Playback FPS | Rate assigned to the decimated frame list so its duration remains synchronized with audio. |
 | FLP pipeline | Direct motion plus frame-loop time, or legacy `run_audio_driving` time including its file/FFmpeg work. |
 | Decode | MP4 decode time. It must be zero for `direct-memory`. |
 | Render | Total render wrapper time. On the direct path this should closely match FLP pipeline time. |
@@ -299,7 +327,7 @@ The summary shows:
 The same measurements are written to server logs:
 
 ```text
-Phrase 1/3 timings: tts=...s first_byte=...ms download=...ms render=...s backend=direct-memory motion=...ms frame_loop=...ms effective_fps=... pipeline=...ms decode=0ms frames=... media=...s buffer=...s underrun=...ms
+Phrase 1/3 timings: tts=...s first_byte=...ms download=...ms render=...s backend=direct-memory stride=2 motion=...ms frame_loop=...ms effective_fps=... pipeline=...ms decode=0ms frames=8/16 playback_fps=12.50 media=...s buffer=...s underrun=...ms
 ```
 
 ### How to interpret measurements
@@ -309,9 +337,10 @@ Phrase 1/3 timings: tts=...s first_byte=...ms download=...ms render=...s backend
 - If `Gap` is consistently positive, increase `PHRASE_TARGET_CHARS` so each
   generated phrase provides more playback time, or optimize the slower stage.
 - If first-ready time is too long, reduce `PHRASE_FIRST_TARGET_CHARS`.
-- If `Frame loop FPS` remains below the source motion rate (normally 25 FPS),
-  file removal alone cannot eliminate gaps. That result justifies the v2C
-  stride or true incremental-render experiment.
+- If Neural FPS remains below the source motion rate (normally 25 FPS), full
+  rendering cannot keep up with real time. Stride two needs only half as many
+  neural frames and can still prepare a phrase faster despite similar Neural
+  FPS.
 - A very short phrase such as `Hello!` has low media duration and can expose a
   gap before phrase 2. That is a latency/prosody tradeoff, not a WebRTC failure.
 
@@ -342,35 +371,52 @@ Interpretation:
   avoidable, but v2B is expected to be a modest improvement rather than the
   final solution.
 
-## v2B A/B benchmark procedure
+## Recorded v2B benchmark
 
-Use the exact same text above and do not change phrase settings.
+The supplied full log confirmed CUDA remained active, direct memory produced no
+request-time FFmpeg output, decode stayed at zero and frame throughput was
+stable across all phrases.
 
-1. Rebuild and start v2B; wait for `Startup warm-up complete`.
-2. Confirm `/health` reports `neural-avatar-v2b-direct-memory`,
-   `render_backend: direct-memory` and `startup_warmup_complete: true`.
-3. Run the text twice without restarting either service. Treat the second run
-   as the primary warm measurement.
-4. Save the UI table and the three `Phrase ... timings` log lines.
-5. Set `DIRECT_MEMORY_RENDER: "false"`, recreate the avatar service, wait for
-   warm-up, and run the same text again if an on-machine A/B comparison is
-   needed.
-6. Record `nvidia-smi` utilization and memory if a gap or CUDA error appears.
+| Phrase | TTS | Motion | Frame loop | Neural FPS | Pipeline | Render change vs v2A.1 | Gap | Gap change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Hello!` | 670 ms | 161 ms | 1,373 ms | 11.65 | 1,534 ms | −15.8% | 0 ms | 0 ms |
+| `This is my first neural streaming avatar test.` | 2,921 ms | 162 ms | 6,562 ms | 11.58 | 6,724 ms | −10.1% | 9,000 ms | −840 ms |
+| `Love to hear you talking, greetings, love it!` | 2,553 ms | 168 ms | 5,703 ms | 11.57 | 5,872 ms | −9.7% | 5,400 ms | −680 ms |
 
-Acceptance criteria for v2B:
+Conclusion: v2B passed. It removed unnecessary transport work and delivered a
+repeatable 10–16% render improvement, but the 11.6 Neural FPS frame loop remains
+well below the 25 FPS motion rate. That evidence supports testing stride two.
 
-- the WebRTC connection and three-phrase split still work;
-- both test runs finish without a CUDA or checkpoint error;
-- every row reports backend `direct-memory` and Decode `0 ms`;
-- request-time logs contain no FFmpeg banner;
-- phrase directories contain `speech.pcm` and `speech.wav`, but no motion
-  pickle or MP4 output;
-- frame count, source FPS, lip sync and crop quality match the legacy path;
-- FLP pipeline time is lower or equal within normal run-to-run noise.
+The startup-only `CoreMLExecutionProvider` warning is harmless on Linux because
+that provider is not installed; CUDA and CPU are available. The shape-merge
+warnings are also unchanged from the working baseline. There was no traceback,
+cuSOLVER failure or ONNX execution error.
 
-If direct memory is slower by more than 10% on two warm runs, or output differs,
-switch back to `DIRECT_MEMORY_RENDER=false` and keep the logs. Do not proceed to
-v2C until the discrepancy is understood.
+## v2C-A benchmark procedure
+
+Use the exact same text and phrase settings again.
+
+1. Rebuild and start v2C-A; wait for `Startup warm-up complete`.
+2. Confirm `/health` reports `neural-avatar-v2c-a-render-stride`, backend
+   `direct-memory`, and `render_stride: 2`.
+3. Run the text twice without restarting services and keep the second run.
+4. Confirm the rows report `8/16`, `38/76` and `33/66` rendered/motion frames,
+   with Playback FPS `12.50` and unchanged media durations.
+5. Compare lip sync, head movement and blinks visually with v2B.
+6. Save the table and `Phrase ... timings` lines before changing any setting.
+
+Expected ranges, not guarantees:
+
+- frame-loop and pipeline time should decrease by roughly 40–50%;
+- phrase-one first-ready time should move toward 1.5 seconds;
+- phrase-two gap may fall from 9.0 seconds toward 5.5–6.0 seconds;
+- phrase-three gap may fall from 5.4 seconds toward 2.3–2.8 seconds;
+- Neural FPS should remain around 11–12 because it measures compute throughput,
+  while only half as many frames are requested.
+
+Acceptance requires correct duration, reasonable lip sync and an observable
+latency win. If motion looks too stepped, set `RENDER_STRIDE=1`; do not hide the
+quality regression by proceeding directly to prefetch.
 
 ## Decision log
 
@@ -415,6 +461,22 @@ v2C until the discrepancy is understood.
   TTS prefetch, TensorRT and Ditto.
 - **Rollback:** set `DIRECT_MEMORY_RENDER=false`; the complete v2A.1 MP4 path is
   still present in `server.py`.
+
+### v2C-A — render alternating motion frames
+
+- **Observed v2B result:** direct mode improved rendering 10–16%, but the neural
+  frame loop remained stable at only 11.57–11.65 FPS and later gaps remained
+  9.0 and 5.4 seconds.
+- **Decision:** default `RENDER_STRIDE=2`, render half of the 25 FPS motion
+  sequence, and label those frames as 12.5 FPS before WebRTC resampling.
+- **Reason:** frame inference is the measured bottleneck. Halving only that work
+  is the smallest reversible experiment likely to make a large difference.
+- **Tradeoff:** held frames can make fast head, eye or mouth motion look less
+  smooth even though duration and audio synchronization remain unchanged.
+- **Intentionally deferred:** TTS prefetch, frame interpolation, incremental
+  append, TensorRT and Ditto.
+- **Rollback:** set `RENDER_STRIDE=1` and recreate `webrtc-avatar`; no rebuild is
+  required.
 
 ## WebRTC behavior
 
@@ -472,10 +534,10 @@ Hello! This is phrase two. This is phrase three, generated later.
 ### Playback pauses between phrases
 
 Look at the `Gap` column. If it is positive, generation is slower than queued
-media playback. Keep the default phrase settings during the v2B A/B benchmark.
+media playback. Keep the default phrase settings during the v2C-A benchmark.
 Longer phrases can amortize fixed overhead, but cannot solve a sustained
-production ratio above 1.0. v2B removes file overhead but still batches a full
-phrase. Render stride and incremental delivery are planned for v2C.
+production ratio above 1.0. v2C-A reduces frame work but still batches a full
+phrase. Bounded TTS prefetch is the next isolated experiment.
 
 ### Backend says `legacy-mp4`
 
@@ -487,7 +549,13 @@ DIRECT_MEMORY_RENDER: "true"
 ```
 
 Then force-recreate `webrtc-avatar`. Paste-back deliberately selects the legacy
-backend because direct-memory v2B supports crop frames only.
+backend because direct-memory rendering supports crop frames only.
+
+### Motion is visibly stepped
+
+Set `RENDER_STRIDE: "1"` and force-recreate `webrtc-avatar`. This restores the
+exact v2B frame selection without disabling direct memory. Keep both timing
+tables so the smoothness/latency tradeoff can be evaluated explicitly.
 
 ### Direct-memory path fails after an upstream update
 
@@ -555,9 +623,9 @@ docker compose down
 
 ## Next architectural step: Ditto online
 
-v2C render stride and bounded prefetch are the next experiments for the working
-FasterLivePortrait stack. They should be introduced one at a time using the v2B
-direct-memory measurements as the baseline.
+Bounded TTS prefetch is the next experiment for the working FasterLivePortrait
+stack, but only after accepting or rejecting stride two. It should use the
+v2C-A measurements as its baseline so GPU contention remains visible.
 
 For truly continuous sub-second interaction, the later migration target is an
 online renderer such as Ditto. That architecture should accept incremental

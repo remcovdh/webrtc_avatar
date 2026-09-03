@@ -64,8 +64,8 @@
         </div>
         <div class="timing-wrap">
           <table>
-            <thead><tr><th>Phrase</th><th>TTS</th><th>First byte</th><th>Backend</th><th>Motion</th><th>Frame loop</th><th>FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
-            <tbody id="timingRows"><tr><td class="empty" colspan="13">Timings appear here</td></tr></tbody>
+            <thead><tr><th>Phrase</th><th>TTS</th><th>First byte</th><th>Backend</th><th>Stride</th><th>Motion</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
+            <tbody id="timingRows"><tr><td class="empty" colspan="16">Timings appear here</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -90,7 +90,7 @@
     function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
     function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
     function resetTimings() {
-      timingRows.innerHTML = '<tr><td class="empty" colspan="13">Splitting text into phrases…</td></tr>';
+      timingRows.innerHTML = '<tr><td class="empty" colspan="16">Splitting text into phrases…</td></tr>';
       timingSummary.textContent = "Waiting for first phrase";
     }
     function formatMs(value) { return `${Math.max(0, Number(value || 0))} ms`; }
@@ -103,9 +103,12 @@
         formatMs(message.tts_ms),
         formatMs(message.tts_first_byte_ms),
         message.render_backend || "unknown",
+        String(Math.max(1, Number(message.render_stride || 1))),
         formatMs(message.render_motion_ms),
         formatMs(message.render_frame_loop_ms),
         formatRate(message.render_effective_fps),
+        `${Number(message.render_frames || 0)}/${Number(message.render_motion_frames || message.render_frames || 0)}`,
+        formatRate(message.render_playback_fps),
         formatMs(message.render_pipeline_ms),
         formatMs(message.render_decode_ms),
         formatMs(message.render_ms),
@@ -144,7 +147,7 @@
             ? `warm-up ${Number(healthBody.startup_warmup_seconds || 0).toFixed(2)} s`
             : `warm-up failed: ${healthBody.startup_warmup_error || "unknown error"}`
           : "warm-up disabled";
-        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · ${warmup}`;
+        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · stride ${healthBody.render_stride || 1} · ${warmup}`;
         const config = await fetch("/client-config").then(response => response.json());
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
         channel = pc.createDataChannel("avatar-control");

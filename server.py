@@ -45,7 +45,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2b-direct-memory"
+SERVER_BUILD = "neural-avatar-v2c-a-render-stride"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -78,6 +78,7 @@ TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
 DIRECT_MEMORY_RENDER = _env_bool("DIRECT_MEMORY_RENDER", True)
+RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
 STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
 WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
 TTS_STARTUP_WAIT_SECONDS = max(
@@ -447,8 +448,11 @@ def _render_animation_legacy(
         "decode_ms": round(decode_seconds * 1000),
         "total_ms": round((time.perf_counter() - render_started) * 1000),
         "pipeline_reported_ms": round(float(reported_elapsed or 0) * 1000),
+        "render_stride": 1,
+        "motion_frames": len(frames),
         "frames": len(frames),
         "source_fps": round(fps, 3),
+        "playback_fps": round(fps, 3),
         "effective_fps": 0.0,
     }
 
@@ -474,8 +478,8 @@ def _render_animation_direct(
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
 
-    This deliberately keeps phrase-level batching for the v2B A/B test. A
-    later step can append frames incrementally once this direct path is proven.
+    This deliberately keeps phrase-level batching so render stride can be
+    measured independently. A later step can append frames incrementally.
     """
     if pipeline is None:
         raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
@@ -490,14 +494,16 @@ def _render_animation_direct(
     motion_info = pipeline.joyvasa_pipe.gen_motion_sequence(str(wav_path))
     motion_seconds = time.perf_counter() - motion_started
 
-    fps = float(motion_info.get("output_fps") or 25.0)
+    source_fps = float(motion_info.get("output_fps") or 25.0)
+    playback_fps = source_fps / RENDER_STRIDE
     motion_list = motion_info["motion"]
     eyes_list = motion_info.get("c_eyes_lst", motion_info.get("c_d_eyes_lst"))
     lips_list = motion_info.get("c_lip_lst", motion_info.get("c_d_lip_lst"))
 
     frame_loop_started = time.perf_counter()
     frames: list[np.ndarray] = []
-    for frame_index, motion in enumerate(motion_list):
+    for frame_index in range(0, len(motion_list), RENDER_STRIDE):
+        motion = motion_list[frame_index]
         eyes = (
             eyes_list[frame_index]
             if eyes_list is not None and frame_index < len(eyes_list)
@@ -524,7 +530,7 @@ def _render_animation_direct(
 
     frame_loop_seconds = time.perf_counter() - frame_loop_started
     total_seconds = time.perf_counter() - render_started
-    return frames, fps, {
+    return frames, playback_fps, {
         "backend": "direct-memory",
         "motion_ms": round(motion_seconds * 1000),
         "frame_loop_ms": round(frame_loop_seconds * 1000),
@@ -532,8 +538,11 @@ def _render_animation_direct(
         "decode_ms": 0,
         "total_ms": round(total_seconds * 1000),
         "pipeline_reported_ms": 0,
+        "render_stride": RENDER_STRIDE,
+        "motion_frames": len(motion_list),
         "frames": len(frames),
-        "source_fps": round(fps, 3),
+        "source_fps": round(source_fps, 3),
+        "playback_fps": round(playback_fps, 3),
         "effective_fps": round(
             len(frames) / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
             3,
@@ -643,9 +652,10 @@ async def _create_clip(
 
                     LOG.info(
                         "Phrase %d/%d timings: tts=%.3fs first_byte=%dms download=%dms "
-                        "render=%.3fs backend=%s motion=%dms frame_loop=%dms "
-                        "effective_fps=%.2f pipeline=%dms decode=%dms frames=%d "
-                        "media=%.3fs buffer=%.3fs underrun=%.0fms",
+                        "render=%.3fs backend=%s stride=%d motion=%dms "
+                        "frame_loop=%dms effective_fps=%.2f pipeline=%dms "
+                        "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
+                        "buffer=%.3fs underrun=%.0fms",
                         index,
                         len(phrases),
                         tts_seconds,
@@ -653,12 +663,15 @@ async def _create_clip(
                         tts_detail["download_ms"],
                         render_seconds,
                         render_detail["backend"],
+                        render_detail["render_stride"],
                         render_detail["motion_ms"],
                         render_detail["frame_loop_ms"],
                         render_detail["effective_fps"],
                         render_detail["pipeline_ms"],
                         render_detail["decode_ms"],
                         render_detail["frames"],
+                        render_detail["motion_frames"],
+                        render_detail["playback_fps"],
                         media_duration,
                         playback.buffered_seconds,
                         underrun_ms,
@@ -677,6 +690,7 @@ async def _create_clip(
                         tts_bytes=tts_detail["bytes"],
                         render_ms=round(render_seconds * 1000),
                         render_backend=render_detail["backend"],
+                        render_stride=render_detail["render_stride"],
                         render_motion_ms=render_detail["motion_ms"],
                         render_frame_loop_ms=render_detail["frame_loop_ms"],
                         render_effective_fps=render_detail["effective_fps"],
@@ -685,8 +699,10 @@ async def _create_clip(
                         render_pipeline_reported_ms=render_detail[
                             "pipeline_reported_ms"
                         ],
+                        render_motion_frames=render_detail["motion_frames"],
                         render_frames=render_detail["frames"],
                         render_source_fps=render_detail["source_fps"],
+                        render_playback_fps=render_detail["playback_fps"],
                         media_seconds=round(media_duration, 3),
                         buffered_seconds=round(playback.buffered_seconds, 3),
                         underrun_ms=round(underrun_ms),
@@ -884,6 +900,12 @@ async def health() -> JSONResponse:
             "direct-memory"
             if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK
             else "legacy-mp4"
+        ),
+        "configured_render_stride": RENDER_STRIDE,
+        "render_stride": (
+            RENDER_STRIDE
+            if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK
+            else 1
         ),
         "startup_warmup_enabled": STARTUP_WARMUP,
         "startup_warmup_complete": warmup_complete,
