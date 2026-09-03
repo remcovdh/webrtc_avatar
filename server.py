@@ -40,9 +40,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from omegaconf import OmegaConf
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
+from src.pipelines.joyvasa_audio_to_motion_pipeline import (
+    JoyVASAAudio2MotionPipeline,
+)
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2a-warmup-metrics"
+SERVER_BUILD = "neural-avatar-v2b-direct-memory"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -74,8 +77,15 @@ TTS_CFG_SCALE = float(os.getenv("BREEZE_CFG_SCALE", "4"))
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
+DIRECT_MEMORY_RENDER = _env_bool("DIRECT_MEMORY_RENDER", True)
 STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
 WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
+TTS_STARTUP_WAIT_SECONDS = max(
+    0.0, float(os.getenv("TTS_STARTUP_WAIT_SECONDS", "300"))
+)
+TTS_STARTUP_POLL_SECONDS = max(
+    0.25, float(os.getenv("TTS_STARTUP_POLL_SECONDS", "2"))
+)
 PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
 PHRASE_FIRST_TARGET_CHARS = max(
     8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
@@ -96,6 +106,7 @@ warmup_complete = False
 warmup_seconds: float | None = None
 warmup_metrics: dict[str, Any] = {}
 warmup_error: str | None = None
+tts_startup_wait_seconds: float | None = None
 
 # JoyVASA's official motion checkpoint stores its configuration as an
 # argparse.Namespace. PyTorch 2.6+ blocks that class by default when loading
@@ -399,10 +410,11 @@ async def _synthesize(
     }
 
 
-def _render_animation(
+def _render_animation_legacy(
     wav_path: Path,
     output_dir: Path,
-) -> tuple[list[np.ndarray], float, dict[str, float | int]]:
+) -> tuple[list[np.ndarray], float, dict[str, Any]]:
+    """Render through FLP's stock pickle, MP4, FFmpeg and decode path."""
     if pipeline is None:
         raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
 
@@ -428,13 +440,114 @@ def _render_animation(
     capture.release()
     decode_seconds = time.perf_counter() - decode_started
     return frames, fps, {
+        "backend": "legacy-mp4",
+        "motion_ms": 0,
+        "frame_loop_ms": 0,
         "pipeline_ms": round(pipeline_seconds * 1000),
         "decode_ms": round(decode_seconds * 1000),
         "total_ms": round((time.perf_counter() - render_started) * 1000),
         "pipeline_reported_ms": round(float(reported_elapsed or 0) * 1000),
         "frames": len(frames),
         "source_fps": round(fps, 3),
+        "effective_fps": 0.0,
     }
+
+
+def _ensure_joyvasa_pipeline() -> None:
+    """Create JoyVASA exactly as FLP's run_audio_driving does."""
+    if pipeline is None:
+        raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
+    if pipeline.joyvasa_pipe is not None:
+        return
+
+    pipeline.joyvasa_pipe = JoyVASAAudio2MotionPipeline(
+        motion_model_path=pipeline.cfg.joyvasa_models.motion_model_path,
+        audio_model_path=pipeline.cfg.joyvasa_models.audio_model_path,
+        motion_template_path=pipeline.cfg.joyvasa_models.motion_template_path,
+        cfg_mode=pipeline.cfg.infer_params.cfg_mode,
+        cfg_scale=pipeline.cfg.infer_params.cfg_scale,
+    )
+
+
+def _render_animation_direct(
+    wav_path: Path,
+) -> tuple[list[np.ndarray], float, dict[str, Any]]:
+    """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
+
+    This deliberately keeps phrase-level batching for the v2B A/B test. A
+    later step can append frames incrementally once this direct path is proven.
+    """
+    if pipeline is None:
+        raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
+    if pipeline.is_source_video:
+        raise RuntimeError("Direct-memory rendering currently requires a source image")
+
+    render_started = time.perf_counter()
+    _ensure_joyvasa_pipeline()
+    assert pipeline.joyvasa_pipe is not None
+
+    motion_started = time.perf_counter()
+    motion_info = pipeline.joyvasa_pipe.gen_motion_sequence(str(wav_path))
+    motion_seconds = time.perf_counter() - motion_started
+
+    fps = float(motion_info.get("output_fps") or 25.0)
+    motion_list = motion_info["motion"]
+    eyes_list = motion_info.get("c_eyes_lst", motion_info.get("c_d_eyes_lst"))
+    lips_list = motion_info.get("c_lip_lst", motion_info.get("c_d_lip_lst"))
+
+    frame_loop_started = time.perf_counter()
+    frames: list[np.ndarray] = []
+    for frame_index, motion in enumerate(motion_list):
+        eyes = (
+            eyes_list[frame_index]
+            if eyes_list is not None and frame_index < len(eyes_list)
+            else None
+        )
+        lips = (
+            lips_list[frame_index]
+            if lips_list is not None and frame_index < len(lips_list)
+            else None
+        )
+        output = pipeline.run_with_pkl(
+            [motion, eyes, lips],
+            pipeline.src_imgs[0],
+            pipeline.src_infos[0],
+            first_frame=frame_index == 0,
+        )
+        out_crop = output[0]
+        if out_crop is None:
+            LOG.warning("Direct renderer returned no face for frame %d", frame_index)
+            continue
+        frames.append(
+            _letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
+        )
+
+    frame_loop_seconds = time.perf_counter() - frame_loop_started
+    total_seconds = time.perf_counter() - render_started
+    return frames, fps, {
+        "backend": "direct-memory",
+        "motion_ms": round(motion_seconds * 1000),
+        "frame_loop_ms": round(frame_loop_seconds * 1000),
+        "pipeline_ms": round(total_seconds * 1000),
+        "decode_ms": 0,
+        "total_ms": round(total_seconds * 1000),
+        "pipeline_reported_ms": 0,
+        "frames": len(frames),
+        "source_fps": round(fps, 3),
+        "effective_fps": round(
+            len(frames) / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
+            3,
+        ),
+    }
+
+
+def _render_animation(
+    wav_path: Path,
+    output_dir: Path,
+) -> tuple[list[np.ndarray], float, dict[str, Any]]:
+    if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK:
+        return _render_animation_direct(wav_path)
+    return _render_animation_legacy(wav_path, output_dir)
 
 
 async def _create_clip(
@@ -530,14 +643,19 @@ async def _create_clip(
 
                     LOG.info(
                         "Phrase %d/%d timings: tts=%.3fs first_byte=%dms download=%dms "
-                        "render=%.3fs pipeline=%dms decode=%dms frames=%d media=%.3fs "
-                        "buffer=%.3fs underrun=%.0fms",
+                        "render=%.3fs backend=%s motion=%dms frame_loop=%dms "
+                        "effective_fps=%.2f pipeline=%dms decode=%dms frames=%d "
+                        "media=%.3fs buffer=%.3fs underrun=%.0fms",
                         index,
                         len(phrases),
                         tts_seconds,
                         tts_detail["first_byte_ms"],
                         tts_detail["download_ms"],
                         render_seconds,
+                        render_detail["backend"],
+                        render_detail["motion_ms"],
+                        render_detail["frame_loop_ms"],
+                        render_detail["effective_fps"],
                         render_detail["pipeline_ms"],
                         render_detail["decode_ms"],
                         render_detail["frames"],
@@ -558,6 +676,10 @@ async def _create_clip(
                         tts_finalize_ms=tts_detail["finalize_ms"],
                         tts_bytes=tts_detail["bytes"],
                         render_ms=round(render_seconds * 1000),
+                        render_backend=render_detail["backend"],
+                        render_motion_ms=render_detail["motion_ms"],
+                        render_frame_loop_ms=render_detail["frame_loop_ms"],
+                        render_effective_fps=render_detail["effective_fps"],
                         render_pipeline_ms=render_detail["pipeline_ms"],
                         render_decode_ms=render_detail["decode_ms"],
                         render_pipeline_reported_ms=render_detail[
@@ -616,14 +738,52 @@ async def _create_clip(
         await _send_event(channel, "error", message=str(exc))
 
 
+async def _wait_for_tts() -> float:
+    """Wait for Breeze because manual/partial Compose starts can bypass depends_on."""
+    started = time.perf_counter()
+    deadline = started + TTS_STARTUP_WAIT_SECONDS
+    last_problem = "no response"
+    announced = False
+
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{TTS_URL}/docs")
+            if response.status_code < 500:
+                waited = time.perf_counter() - started
+                if announced:
+                    LOG.info("Breeze became ready after %.3fs", waited)
+                return waited
+            last_problem = f"HTTP {response.status_code}"
+        except httpx.HTTPError as exc:
+            last_problem = f"{type(exc).__name__}: {exc}"
+
+        now = time.perf_counter()
+        if now >= deadline:
+            raise TimeoutError(
+                f"Breeze was not ready at {TTS_URL} after "
+                f"{TTS_STARTUP_WAIT_SECONDS:.1f}s ({last_problem})"
+            )
+        if not announced:
+            LOG.info(
+                "Waiting up to %.1fs for Breeze at %s before startup warm-up",
+                TTS_STARTUP_WAIT_SECONDS,
+                TTS_URL,
+            )
+            announced = True
+        await asyncio.sleep(min(TTS_STARTUP_POLL_SECONDS, deadline - now))
+
+
 async def _warmup_pipeline() -> None:
     """Exercise the same TTS, JoyVASA and renderer path before the first user."""
     global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
+    global tts_startup_wait_seconds
 
     started = time.perf_counter()
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     LOG.info("Startup warm-up begins with %r", WARMUP_TEXT)
     try:
+        tts_startup_wait_seconds = await _wait_for_tts()
         with tempfile.TemporaryDirectory(prefix="warmup-", dir=RESULTS_ROOT) as tmp:
             warmup_dir = Path(tmp)
             pcm_path = warmup_dir / "warmup.pcm"
@@ -641,6 +801,7 @@ async def _warmup_pipeline() -> None:
             )
             warmup_seconds = time.perf_counter() - started
             warmup_metrics = {
+                "tts_startup_wait_ms": round(tts_startup_wait_seconds * 1000),
                 "tts": tts_detail,
                 "render": render_detail,
                 "media_seconds": round(
@@ -718,6 +879,12 @@ async def health() -> JSONResponse:
         "onnx_providers": providers,
         "cuda_provider": "CUDAExecutionProvider" in providers,
         "paste_back": AVATAR_PASTE_BACK,
+        "direct_memory_render": DIRECT_MEMORY_RENDER,
+        "render_backend": (
+            "direct-memory"
+            if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK
+            else "legacy-mp4"
+        ),
         "startup_warmup_enabled": STARTUP_WARMUP,
         "startup_warmup_complete": warmup_complete,
         "startup_warmup_seconds": (
@@ -725,6 +892,13 @@ async def health() -> JSONResponse:
         ),
         "startup_warmup_metrics": warmup_metrics,
         "startup_warmup_error": warmup_error,
+        "tts_startup_wait_limit_seconds": TTS_STARTUP_WAIT_SECONDS,
+        "tts_startup_poll_seconds": TTS_STARTUP_POLL_SECONDS,
+        "tts_startup_wait_seconds": (
+            round(tts_startup_wait_seconds, 3)
+            if tts_startup_wait_seconds is not None
+            else None
+        ),
         "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
         "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
         "phrase_target_chars": PHRASE_TARGET_CHARS,

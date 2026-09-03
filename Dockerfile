@@ -49,6 +49,15 @@ RUN mkdir -p /workspace/FasterLivePortrait \
       | tar -xz --strip-components=1 -C /workspace/FasterLivePortrait
 
 WORKDIR /workspace/FasterLivePortrait
+# The v2B server calls these upstream APIs directly to avoid video files.
+# Fail the build with a clear message if the moving master branch changes the
+# contract, rather than failing on the first request at runtime.
+RUN grep -Fq 'def gen_motion_sequence(' src/pipelines/joyvasa_audio_to_motion_pipeline.py \
+    && grep -Fq 'def run_with_pkl(' src/pipelines/faster_live_portrait_pipeline.py \
+    && grep -Fq 'self.src_imgs[0], self.src_infos[0]' src/pipelines/gradio_live_portrait_pipeline.py \
+    && grep -Fq '"output_fps"' src/pipelines/gradio_live_portrait_pipeline.py \
+    && grep -Fq '"motion"' src/pipelines/gradio_live_portrait_pipeline.py
+
 # FasterLivePortrait's JoyVASA loader predates PyTorch 2.6's restricted
 # checkpoint loading default. Keep restricted loading enabled and narrowly
 # allow its two non-tensor metadata classes only while the official motion

@@ -56,10 +56,17 @@ services:
       # The crop contains the animated face and avoids the per-frame cuSOLVER
       # matrix inverse used to composite it back into the original photograph.
       AVATAR_PASTE_BACK: "false"
+      # v2B bypasses FLP's temporary pickle, two MP4 files, two FFmpeg muxes
+      # and the final OpenCV decode. Set false for an immediate v2A.1 rollback.
+      DIRECT_MEMORY_RENDER: "true"
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"
       WARMUP_TEXT: "Hello."
+      # Protect manual or partial Compose starts: wait for Breeze instead of
+      # failing warm-up immediately when port 7860 is not ready yet.
+      TTS_STARTUP_WAIT_SECONDS: "300"
+      TTS_STARTUP_POLL_SECONDS: "2"
       # Progressive phrase playback: generate phrase 1, start playback, then
       # generate later phrases while the current media queue is consumed.
       PROGRESSIVE_PHRASE_MODE: "true"
