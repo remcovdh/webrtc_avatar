@@ -45,7 +45,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2c-a-render-stride"
+SERVER_BUILD = "neural-avatar-v2c-b-tts-prefetch"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -88,6 +88,7 @@ TTS_STARTUP_POLL_SECONDS = max(
     0.25, float(os.getenv("TTS_STARTUP_POLL_SECONDS", "2"))
 )
 PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
+TTS_PREFETCH = _env_bool("TTS_PREFETCH", True)
 PHRASE_FIRST_TARGET_CHARS = max(
     8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
 )
@@ -559,6 +560,50 @@ def _render_animation(
     return _render_animation_legacy(wav_path, output_dir)
 
 
+async def _prepare_phrase_audio(
+    phrase: str,
+    instruction: str,
+    tmp_dir: Path,
+    index: int,
+    phrase_count: int,
+    channel: Any,
+    prefetched: bool,
+) -> dict[str, Any]:
+    """Synthesize one phrase in its own directory and retain timing metadata."""
+    chunk_dir = tmp_dir / f"chunk-{index:03d}"
+    chunk_dir.mkdir(exist_ok=True)
+    pcm_path = chunk_dir / "speech.pcm"
+    wav_path = chunk_dir / "speech.wav"
+    await _send_event(
+        channel,
+        "status",
+        phase="tts-prefetch" if prefetched else "tts",
+        chunk=index,
+        chunks=phrase_count,
+        message=(
+            f"Phrase {index}/{phrase_count}: pre-generating speech during render…"
+            if prefetched
+            else f"Phrase {index}/{phrase_count}: generating speech…"
+        ),
+    )
+    started = time.perf_counter()
+    pcm, detail = await _synthesize(
+        phrase,
+        instruction or TTS_INSTRUCTION,
+        pcm_path,
+        wav_path,
+    )
+    completed = time.perf_counter()
+    return {
+        "chunk_dir": chunk_dir,
+        "wav_path": wav_path,
+        "pcm": pcm,
+        "detail": detail,
+        "seconds": completed - started,
+        "prefetched": prefetched,
+    }
+
+
 async def _create_clip(
     text: str,
     instruction: str,
@@ -581,6 +626,7 @@ async def _create_clip(
     request_started = time.perf_counter()
     total_tts = 0.0
     total_render = 0.0
+    tts_task: asyncio.Task[dict[str, Any]] | None = None
 
     await _send_event(
         channel,
@@ -598,29 +644,33 @@ async def _create_clip(
             with tempfile.TemporaryDirectory(prefix="avatar-", dir=RESULTS_ROOT) as tmp:
                 tmp_dir = Path(tmp)
                 for index, phrase in enumerate(phrases, start=1):
-                    chunk_dir = tmp_dir / f"chunk-{index:03d}"
-                    chunk_dir.mkdir()
-                    pcm_path = chunk_dir / "speech.pcm"
-                    wav_path = chunk_dir / "speech.wav"
                     underruns_before = playback.audio_underruns
                     video_underruns_before = playback.video_underruns
 
-                    await _send_event(
-                        channel,
-                        "status",
-                        phase="tts",
-                        chunk=index,
-                        chunks=len(phrases),
-                        message=f"Phrase {index}/{len(phrases)}: generating speech…",
-                    )
-                    started = time.perf_counter()
-                    pcm, tts_detail = await _synthesize(
-                        phrase,
-                        instruction or TTS_INSTRUCTION,
-                        pcm_path,
-                        wav_path,
-                    )
-                    tts_seconds = time.perf_counter() - started
+                    if tts_task is None:
+                        tts_task = asyncio.create_task(
+                            _prepare_phrase_audio(
+                                phrase,
+                                instruction,
+                                tmp_dir,
+                                index,
+                                len(phrases),
+                                channel,
+                                prefetched=False,
+                            )
+                        )
+                    current_tts_task = tts_task
+                    tts_task = None
+                    tts_wait_started = time.perf_counter()
+                    audio_result = await current_tts_task
+                    tts_wait_seconds = time.perf_counter() - tts_wait_started
+                    chunk_dir = audio_result["chunk_dir"]
+                    wav_path = audio_result["wav_path"]
+                    pcm = audio_result["pcm"]
+                    tts_detail = audio_result["detail"]
+                    tts_seconds = audio_result["seconds"]
+                    tts_wait_ms = round(tts_wait_seconds * 1000)
+                    tts_overlap_ms = max(0, round(tts_seconds * 1000) - tts_wait_ms)
                     total_tts += tts_seconds
 
                     await _send_event(
@@ -631,6 +681,18 @@ async def _create_clip(
                         chunks=len(phrases),
                         message=f"Phrase {index}/{len(phrases)}: rendering facial motion…",
                     )
+                    if TTS_PREFETCH and index < len(phrases):
+                        tts_task = asyncio.create_task(
+                            _prepare_phrase_audio(
+                                phrases[index],
+                                instruction,
+                                tmp_dir,
+                                index + 1,
+                                len(phrases),
+                                channel,
+                                prefetched=True,
+                            )
+                        )
                     started = time.perf_counter()
                     frames, fps, render_detail = await asyncio.to_thread(
                         _render_animation, wav_path, chunk_dir
@@ -651,7 +713,8 @@ async def _create_clip(
                     ) / VIDEO_FPS * 1000
 
                     LOG.info(
-                        "Phrase %d/%d timings: tts=%.3fs first_byte=%dms download=%dms "
+                        "Phrase %d/%d timings: tts=%.3fs tts_wait=%dms "
+                        "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
                         "render=%.3fs backend=%s stride=%d motion=%dms "
                         "frame_loop=%dms effective_fps=%.2f pipeline=%dms "
                         "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
@@ -659,6 +722,9 @@ async def _create_clip(
                         index,
                         len(phrases),
                         tts_seconds,
+                        tts_wait_ms,
+                        tts_overlap_ms,
+                        audio_result["prefetched"],
                         tts_detail["first_byte_ms"],
                         tts_detail["download_ms"],
                         render_seconds,
@@ -683,6 +749,9 @@ async def _create_clip(
                         chunks=len(phrases),
                         phrase=phrase,
                         tts_ms=round(tts_seconds * 1000),
+                        tts_wait_ms=tts_wait_ms,
+                        tts_overlap_ms=tts_overlap_ms,
+                        tts_prefetched=audio_result["prefetched"],
                         tts_headers_ms=tts_detail["headers_ms"],
                         tts_first_byte_ms=tts_detail["first_byte_ms"],
                         tts_download_ms=tts_detail["download_ms"],
@@ -752,6 +821,11 @@ async def _create_clip(
         playback.clear()
         LOG.exception("Avatar generation failed")
         await _send_event(channel, "error", message=str(exc))
+    finally:
+        if tts_task is not None:
+            if not tts_task.done():
+                tts_task.cancel()
+            await asyncio.gather(tts_task, return_exceptions=True)
 
 
 async def _wait_for_tts() -> float:
@@ -922,6 +996,8 @@ async def health() -> JSONResponse:
             else None
         ),
         "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
+        "tts_prefetch": TTS_PREFETCH,
+        "tts_prefetch_depth": 1 if TTS_PREFETCH else 0,
         "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
         "phrase_target_chars": PHRASE_TARGET_CHARS,
         "phrase_max_chars": PHRASE_MAX_CHARS,

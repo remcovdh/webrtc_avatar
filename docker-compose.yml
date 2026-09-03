@@ -62,6 +62,9 @@ services:
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
       RENDER_STRIDE: "2"
+      # v2C-B overlaps at most one future Breeze request with the current
+      # avatar render. Set false for exact v2C-A serial scheduling.
+      TTS_PREFETCH: "false"
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"

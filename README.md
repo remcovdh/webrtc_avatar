@@ -1,13 +1,12 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2c-a-render-stride`
+Current build: `neural-avatar-v2c-b-tts-prefetch`
 
-This archive is v2C-A of the latency optimization series. It retains the proven
-v2B direct-memory renderer and adds a configurable render stride. The default
-stride of two renders alternating 25 FPS JoyVASA motion frames and preserves
-the original duration by holding each neural frame across its skipped interval.
-This deliberately trades some temporal detail for substantially less neural
-frame work. Set the stride to one for exact v2B behavior.
+This archive is v2C-B of the latency optimization series. It retains the proven
+stride-two direct renderer and overlaps at most one future Breeze phrase with
+the current FasterLivePortrait render. This bounded depth-one prefetch targets
+the strictly serial TTS→render pauses measured in v2C-A. Set `TTS_PREFETCH=false`
+for exact v2C-A scheduling.
 
 This project is a working test of a browser-delivered talking avatar:
 
@@ -32,9 +31,9 @@ text -> phrase 1: TTS -> render -> playback starts
 This substantially improves time-to-first-speech for multi-sentence input. It
 is not yet frame-by-frame neural streaming: Breeze, JoyVASA and
 FasterLivePortrait still complete each phrase before that phrase is appended to
-playback. v2C-A reduces the number of neural frames but still waits for the
-selected frames of a phrase before appending it. Incremental frame delivery is
-a later, separately measured change. If a later
+playback. v2C-B also starts TTS for the next phrase while rendering the current
+one. Each phrase still waits for its selected frames before being appended;
+incremental frame delivery is a later, separately measured change. If a later
 phrase takes longer to generate than the media already buffered, the client
 receives silence and holds the last video frame. That gap is measured as an
 underrun in the UI.
@@ -94,10 +93,12 @@ Expected progressive fields:
 
 ```json
 {
-  "server_build": "neural-avatar-v2c-a-render-stride",
+  "server_build": "neural-avatar-v2c-b-tts-prefetch",
   "render_backend": "direct-memory",
   "direct_memory_render": true,
   "render_stride": 2,
+  "tts_prefetch": true,
+  "tts_prefetch_depth": 1,
   "startup_warmup_enabled": true,
   "startup_warmup_complete": true,
   "progressive_phrase_mode": true,
@@ -129,15 +130,16 @@ Changes are intentionally introduced and measured one step at a time:
    FasterLivePortrait; expose detailed TTS, pipeline and decode measurements.
 2. **v2B, complete:** bypass the motion pickle, MP4/FFmpeg work and MP4
    decode; feed completed phrase frames directly into the WebRTC buffer.
-3. **v2C-A, this archive:** render alternating motion frames with a configurable
+3. **v2C-A, complete:** render alternating motion frames with a configurable
    stride and preserve media duration using frame holds.
-4. **v2C-B, only after measuring v2C-A:** test bounded TTS prefetch separately.
+4. **v2C-B, this archive:** overlap one future TTS request with the current
+   portrait render; measure hidden TTS time and GPU contention.
 5. **Later experiments:** test a Blackwell-compatible TensorRT path and Ditto
    online in separate containers.
 
 The order matters. v2A establishes a warm baseline, v2B isolates file overhead,
-and v2C-A measures a deliberate temporal-quality tradeoff. TTS prefetch remains
-separate so GPU contention cannot be mistaken for a stride result.
+and v2C-A measures a deliberate temporal-quality tradeoff. v2C-B now isolates
+concurrency so GPU contention can be measured against the accepted stride run.
 
 ## Startup warm-up configuration
 
@@ -213,10 +215,51 @@ audio duration, WebRTC's 30 FPS transport, or image resolution. It changes how
 many intermediate neural portrait frames are inferred. Compare lip sync,
 blinks, head motion and visual smoothness before accepting this tradeoff.
 
+## Bounded TTS prefetch configuration
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `TTS_PREFETCH` | `true` | Starts TTS for phrase N+1 while rendering phrase N. |
+
+Prefetch depth is deliberately fixed at one. There is never more than one
+Breeze request active, and at most one future WAV is retained. This bounds GPU
+and memory pressure while allowing separate Docker services to overlap TTS and
+portrait inference.
+
+```mermaid
+sequenceDiagram
+    participant Loop as Phrase loop
+    participant Breeze
+    participant FLP
+    Loop->>Breeze: Generate audio 1
+    Breeze-->>Loop: Audio 1
+    par Current render
+        Loop->>FLP: Render phrase 1
+    and Next prefetch
+        Loop->>Breeze: Generate audio 2
+    end
+```
+
+The first phrase is never prefetched. For later phrases the UI separates:
+
+- `TTS`: total Breeze wall time, including any GPU-contention slowdown;
+- `TTS wait`: time the serial phrase loop actually waited for that result;
+- `TTS overlap`: TTS time hidden behind the preceding render.
+
+On a shared laptop GPU, concurrency can slow one or both models or expose an
+out-of-memory/driver issue. Compare Neural FPS, TTS time, first-ready latency,
+GPU memory and errors against v2C-A. Immediate scheduling rollback:
+
+```yaml
+TTS_PREFETCH: "false"
+```
+
+Then force-recreate `webrtc-avatar`; no image rebuild is required.
+
 ## Progressive phrase configuration
 
-These are the only new settings added by this update. They are under the
-`webrtc-avatar.environment` section of `docker-compose.yml`.
+These settings are under the `webrtc-avatar.environment` section of
+`docker-compose.yml`.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -259,6 +302,7 @@ available in `server.py` or `entrypoint.sh`.
 | `RESULTS_ROOT` | `/workspace/results` | Temporary request output. Each phrase gets its own subdirectory. |
 | `DIRECT_MEMORY_RENDER` | `true` | Selects the v2B in-memory renderer; `false` selects the v2A.1 legacy MP4 path. |
 | `RENDER_STRIDE` | `2` | Neural-frame decimation used by direct memory. `1` restores full-frame v2B rendering. |
+| `TTS_PREFETCH` | `true` | Overlaps one future TTS phrase with the current render. `false` restores v2C-A scheduling. |
 | `STARTUP_WARMUP` | `true` | Moves lazy model initialization into container startup. |
 | `WARMUP_TEXT` | `Hello.` | Disposable phrase used by startup warm-up. |
 | `TTS_STARTUP_WAIT_SECONDS` | `300` | Readiness timeout used before startup warm-up. |
@@ -300,7 +344,9 @@ The browser adds one row when a phrase is ready:
 | Column | Meaning |
 | --- | --- |
 | Phrase | Phrase number, total count and text. |
-| TTS | Wall time spent waiting for Breeze to generate that phrase. |
+| TTS | Total Breeze wall time for the phrase, including any concurrency slowdown. |
+| TTS wait | Portion of TTS wall time that blocked the phrase loop. |
+| TTS overlap | Portion of TTS wall time hidden behind the preceding render. |
 | First byte | Time from the TTS request until its first response-body byte. |
 | Backend | `direct-memory` for v2B or `legacy-mp4` for the rollback path. |
 | Stride | Interval between rendered JoyVASA motion frames. `2` renders frames 0, 2, 4 and so on. |
@@ -327,13 +373,13 @@ The summary shows:
 The same measurements are written to server logs:
 
 ```text
-Phrase 1/3 timings: tts=...s first_byte=...ms download=...ms render=...s backend=direct-memory stride=2 motion=...ms frame_loop=...ms effective_fps=... pipeline=...ms decode=0ms frames=8/16 playback_fps=12.50 media=...s buffer=...s underrun=...ms
+Phrase 1/3 timings: tts=...s tts_wait=...ms tts_overlap=...ms prefetched=True first_byte=...ms download=...ms render=...s backend=direct-memory stride=2 motion=...ms frame_loop=...ms effective_fps=... pipeline=...ms decode=0ms frames=8/16 playback_fps=12.50 media=...s buffer=...s underrun=...ms
 ```
 
 ### How to interpret measurements
 
-- If `TTS + Render` for phrase 2 is lower than phrase 1's `Media`, playback can
-  usually continue without a gap.
+- With prefetch enabled, compare `TTS wait + Render` with the preceding
+  phrase's `Media`. Total TTS includes work already hidden by overlap.
 - If `Gap` is consistently positive, increase `PHRASE_TARGET_CHARS` so each
   generated phrase provides more playback time, or optimize the slower stage.
 - If first-ready time is too long, reduce `PHRASE_FIRST_TARGET_CHARS`.
@@ -341,6 +387,8 @@ Phrase 1/3 timings: tts=...s first_byte=...ms download=...ms render=...s backend
   rendering cannot keep up with real time. Stride two needs only half as many
   neural frames and can still prepare a phrase faster despite similar Neural
   FPS.
+- If total TTS or render time rises materially while overlapping, the two GPU
+  workloads are contending. Compare wall time and gaps, not overlap alone.
 - A very short phrase such as `Hello!` has low media duration and can expose a
   gap before phrase 2. That is a latency/prosody tradeoff, not a WebRTC failure.
 
@@ -392,31 +440,59 @@ that provider is not installed; CUDA and CPU are available. The shape-merge
 warnings are also unchanged from the working baseline. There was no traceback,
 cuSOLVER failure or ONNX execution error.
 
-## v2C-A benchmark procedure
+## Recorded v2C-A benchmark
 
-Use the exact same text and phrase settings again.
+The supplied four-phrase run completed without a traceback, CUDA/ONNX error or
+FFmpeg fallback. Frame counts, 12.5 Playback FPS and media durations confirm
+that stride two behaved as designed.
 
-1. Rebuild and start v2C-A; wait for `Startup warm-up complete`.
-2. Confirm `/health` reports `neural-avatar-v2c-a-render-stride`, backend
-   `direct-memory`, and `render_stride: 2`.
+| Phrase | TTS | Frame loop | Pipeline | Neural FPS | Frames | Media | Gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Hello!` | 668 ms | 670 ms | 816 ms | 11.94 | 8/16 | 0.64 s | 0 ms |
+| `This is my first neural streaming avatar test.` | 2,888 ms | 3,279 ms | 3,439 ms | 11.59 | 38/76 | 3.04 s | 5,680 ms |
+| `I love to hear you speaking.` | 1,935 ms | 2,159 ms | 2,292 ms | 11.58 | 25/50 | 2.00 s | 1,200 ms |
+| `Thanks for joining` | 1,110 ms | 1,202 ms | 1,363 ms | 11.65 | 14/28 | 1.12 s | 460 ms |
+
+For the two phrases directly comparable to v2B, rendering improved 46.7% and
+48.8%. Phrase-two gap fell from 9.0 to 5.68 seconds. v2C-A therefore passed its
+latency target; visual smoothness remains a user acceptance decision.
+
+The gap equation now matches the logs almost exactly. For phrase two:
+
+```text
+2.888 s TTS + 3.440 s render - 0.640 s prior buffer = 5.688 s predicted gap
+5.680 s measured gap
+```
+
+This confirms serial scheduling, rather than WebRTC, accounts for the remaining
+pause.
+
+## v2C-B benchmark procedure
+
+Use the same four-phrase text and keep all stride/phrase settings unchanged.
+
+1. Rebuild and start v2C-B; wait for startup warm-up.
+2. Confirm `/health` reports build `neural-avatar-v2c-b-tts-prefetch`, stride
+   `2`, `tts_prefetch: true`, and `tts_prefetch_depth: 1`.
 3. Run the text twice without restarting services and keep the second run.
-4. Confirm the rows report `8/16`, `38/76` and `33/66` rendered/motion frames,
-   with Playback FPS `12.50` and unchanged media durations.
-5. Compare lip sync, head movement and blinks visually with v2B.
-6. Save the table and `Phrase ... timings` lines before changing any setting.
+4. Confirm phrase one reports approximately zero TTS overlap. Later phrases
+   should report `prefetched=True` in logs and nonzero TTS overlap in the UI.
+5. Compare TTS, Neural FPS, render time, first-ready time, gaps and GPU memory
+   against v2C-A. Also check for CUDA/OOM errors.
 
-Expected ranges, not guarantees:
+Ideal no-contention prediction from the v2C-A timings:
 
-- frame-loop and pipeline time should decrease by roughly 40–50%;
-- phrase-one first-ready time should move toward 1.5 seconds;
-- phrase-two gap may fall from 9.0 seconds toward 5.5–6.0 seconds;
-- phrase-three gap may fall from 5.4 seconds toward 2.3–2.8 seconds;
-- Neural FPS should remain around 11–12 because it measures compute throughput,
-  while only half as many frames are requested.
+| Phrase | Predicted TTS wait | Predicted gap |
+| --- | ---: | ---: |
+| 1 | 668 ms | 0 ms |
+| 2 | about 2,070 ms | about 4,870 ms |
+| 3 | about 0 ms | about 0 ms |
+| 4 | about 0 ms | about 0 ms |
 
-Acceptance requires correct duration, reasonable lip sync and an observable
-latency win. If motion looks too stepped, set `RENDER_STRIDE=1`; do not hide the
-quality regression by proceeding directly to prefetch.
+Real values may be worse because Breeze and FasterLivePortrait share the RTX
+5080. Accept v2C-B only if it lowers total gap without a CUDA failure, obvious
+quality change, or more than roughly 20% regression in first-ready, TTS or
+Neural FPS. Otherwise set `TTS_PREFETCH=false` and retain v2C-A.
 
 ## Decision log
 
@@ -478,6 +554,21 @@ quality regression by proceeding directly to prefetch.
 - **Rollback:** set `RENDER_STRIDE=1` and recreate `webrtc-avatar`; no rebuild is
   required.
 
+### v2C-B — prefetch one future TTS phrase
+
+- **Observed v2C-A result:** stride two cut comparable render time by 46.7–48.8%,
+  but serial `TTS + render − buffer` still explained every remaining gap.
+- **Decision:** start only phrase N+1 TTS while rendering phrase N and measure
+  total TTS, blocking wait and hidden overlap separately.
+- **Reason:** later TTS calls can fit entirely inside the preceding long render
+  in the measured four-phrase workload, potentially eliminating later gaps.
+- **Risk:** both services share one GPU. Concurrent kernels or memory pressure
+  can slow first-ready/render/TTS or cause CUDA failure.
+- **Bound:** prefetch depth is fixed at one; multiple simultaneous Breeze
+  requests are never issued, and unfinished work is cancelled on failure.
+- **Rollback:** set `TTS_PREFETCH=false` and recreate `webrtc-avatar`; no rebuild
+  is required.
+
 ## WebRTC behavior
 
 The connection remains open between requests. The server sends:
@@ -534,10 +625,17 @@ Hello! This is phrase two. This is phrase three, generated later.
 ### Playback pauses between phrases
 
 Look at the `Gap` column. If it is positive, generation is slower than queued
-media playback. Keep the default phrase settings during the v2C-A benchmark.
+media playback. Keep the default phrase settings during the v2C-B benchmark.
 Longer phrases can amortize fixed overhead, but cannot solve a sustained
-production ratio above 1.0. v2C-A reduces frame work but still batches a full
-phrase. Bounded TTS prefetch is the next isolated experiment.
+production ratio above 1.0. v2C-B overlaps TTS but still batches a full phrase.
+Incremental frame append is the remaining FasterLivePortrait experiment.
+
+### Prefetch makes performance worse or causes a CUDA error
+
+Set `TTS_PREFETCH: "false"` and force-recreate `webrtc-avatar`. Compare total
+TTS, TTS wait, TTS overlap, render time and Neural FPS. A high overlap value is
+not a win if GPU contention increases the combined wall time or destabilizes
+the driver.
 
 ### Backend says `legacy-mp4`
 
@@ -623,9 +721,10 @@ docker compose down
 
 ## Next architectural step: Ditto online
 
-Bounded TTS prefetch is the next experiment for the working FasterLivePortrait
-stack, but only after accepting or rejecting stride two. It should use the
-v2C-A measurements as its baseline so GPU contention remains visible.
+After accepting or rejecting v2C-B, the remaining FasterLivePortrait experiment
+is incremental frame append so playback can begin before a complete phrase is
+rendered. That requires a thread-safe bounded frame queue and careful audio
+start timing; it should remain separate from the current prefetch measurement.
 
 For truly continuous sub-second interaction, the later migration target is an
 online renderer such as Ditto. That architecture should accept incremental
