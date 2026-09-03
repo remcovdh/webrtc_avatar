@@ -28,6 +28,16 @@
     #status.good { color:var(--good); border-color:#38c79355; }
     #status.bad { color:var(--bad); border-color:#ff6b7855; }
     .details { color:var(--muted); font-size:12px; }
+    .metrics { display:grid; gap:8px; }
+    .metrics-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#cdd3da; font-size:13px; }
+    #timingSummary { color:var(--muted); font-size:11px; text-align:right; }
+    .timing-wrap { overflow:auto; border:1px solid var(--line); border-radius:10px; background:#0d1015; }
+    table { width:100%; border-collapse:collapse; font-size:11px; white-space:nowrap; }
+    th,td { padding:7px 8px; text-align:right; border-bottom:1px solid #20262e; }
+    th:first-child,td:first-child { text-align:left; max-width:130px; overflow:hidden; text-overflow:ellipsis; }
+    th { color:var(--muted); font-weight:600; }
+    tbody tr:last-child td { border-bottom:0; }
+    .empty { color:var(--muted); text-align:center!important; }
     @media (max-width:760px) { main { grid-template-columns:1fr; max-width:512px; } }
   </style>
 </head>
@@ -47,7 +57,19 @@
         <button id="audioBtn" class="secondary">Enable audio</button>
       </div>
       <div id="status" role="status" aria-live="polite">Checking the server…</div>
-      <div class="details">The neural motion pass is prepared before synchronized WebRTC playback begins.</div>
+      <section class="metrics" aria-label="Progressive phrase timings">
+        <div class="metrics-head">
+          <span>Phrase timings</span>
+          <span id="timingSummary">No request yet</span>
+        </div>
+        <div class="timing-wrap">
+          <table>
+            <thead><tr><th>Phrase</th><th>TTS</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
+            <tbody id="timingRows"><tr><td class="empty" colspan="6">Timings appear here</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+      <div class="details">The first phrase plays as soon as it is ready while later phrases are generated.</div>
     </section>
   </main>
   <script>
@@ -58,12 +80,39 @@
     const instructionInput = document.querySelector("#instructionInput");
     const sendBtn = document.querySelector("#sendBtn");
     const audioBtn = document.querySelector("#audioBtn");
-    let pc, channel, completionTimer;
+    const timingRows = document.querySelector("#timingRows");
+    const timingSummary = document.querySelector("#timingSummary");
+    let pc, channel;
     const stream = new MediaStream();
     video.srcObject = stream;
 
     function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
     function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
+    function resetTimings() {
+      timingRows.innerHTML = '<tr><td class="empty" colspan="6">Splitting text into phrases…</td></tr>';
+      timingSummary.textContent = "Waiting for first phrase";
+    }
+    function formatMs(value) { return `${Math.max(0, Number(value || 0))} ms`; }
+    function appendTiming(message) {
+      if (timingRows.querySelector(".empty")) timingRows.innerHTML = "";
+      const row = document.createElement("tr");
+      const values = [
+        `${message.chunk}/${message.chunks} ${message.phrase || ""}`,
+        formatMs(message.tts_ms),
+        formatMs(message.render_ms),
+        `${Number(message.media_seconds || 0).toFixed(2)} s`,
+        `${Number(message.buffered_seconds || 0).toFixed(2)} s`,
+        formatMs(message.underrun_ms),
+      ];
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        cell.title = value;
+        row.appendChild(cell);
+      }
+      timingRows.appendChild(row);
+      if (message.first_ready_ms != null) timingSummary.textContent = `First playback ready in ${formatMs(message.first_ready_ms)}`;
+    }
     async function waitForIceGathering(peer) {
       if (peer.iceGatheringState === "complete") return;
       await new Promise(resolve => {
@@ -102,13 +151,19 @@
           try { message = JSON.parse(event.data); }
           catch { message = { type:"status", message:String(event.data) }; }
           if (message.type === "error") {
-            clearTimeout(completionTimer); setReady(true); setStatus(message.message || "Generation failed", "bad");
+            setReady(true); setStatus(message.message || "Generation failed", "bad");
           } else if (message.type === "ready") {
             setReady(true);
+          } else if (message.type === "plan") {
+            timingSummary.textContent = `${message.phrases?.length || 1} phrase(s)`;
+            setStatus(message.message || "Phrase plan ready");
+          } else if (message.type === "metrics") {
+            appendTiming(message);
           } else if (message.type === "playing") {
             setStatus(message.message || "Playing…", "good");
-            const delay = Math.max(500, Number(message.duration || 0) * 1000 + 500);
-            completionTimer = setTimeout(() => setReady(true), delay);
+          } else if (message.type === "summary") {
+            timingSummary.textContent = `TTS ${formatMs(message.tts_ms)} · render ${formatMs(message.render_ms)} · total ${formatMs(message.total_ms)} · gaps ${formatMs(message.underrun_ms)}`;
+            setStatus(message.message || "Playback complete", "good");
           } else {
             setStatus(message.message || "Working…");
           }
@@ -129,7 +184,7 @@
     function sendText() {
       const text = textInput.value.trim();
       if (!text || channel?.readyState !== "open") return;
-      clearTimeout(completionTimer); sendBtn.disabled = true; setStatus("Request sent…");
+      resetTimings(); sendBtn.disabled = true; setStatus("Request sent…");
       channel.send(JSON.stringify({ text, instruction:instructionInput.value.trim() }));
     }
     sendBtn.addEventListener("click", sendText);

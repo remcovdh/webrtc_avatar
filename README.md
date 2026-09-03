@@ -1,125 +1,88 @@
-# Sana on an RTX 5080 Laptop (16 GB) — Docker
+# Neural avatar WebRTC test
 
-This container is tuned for **NVIDIA consumer Blackwell / sm_120**, using the current Sana dependency baseline: **Python 3.11, PyTorch 2.9.1, CUDA 12.8**.
+This test connects four stages:
 
-## What will fit on a 5080 Laptop
+1. **Breeze TTS 2** produces 24 kHz mono PCM from text.
+2. **JoyVASA** turns the completed speech into neural facial and head motion.
+3. **FasterLivePortrait** renders that motion onto `inputs/avatar.jpg`.
+4. **aiortc** sends synchronized audio and 512×512 video to the browser.
 
-| Sana family | 16 GB RTX 5080 Laptop | Suggested mode |
-|---|---|---|
-| Sana 0.6B image | Yes | BF16 on GPU |
-| Sana / Sana 1.5 1.6B image | Yes | BF16 on GPU; use `--offload model` if another app is using VRAM |
-| 4-bit Sana image | Yes | Use the repo's quantized path if desired |
-| SANA-Video 480p 2B | Try with offload | Start with `video.py` + `--offload model`; reduce frames if needed |
-| SANA-Video 720p / LTX2 refiner | Not guaranteed in 16 GB | Strong offload / smaller workloads; expect slower execution |
-| SANA-WM | No, not fully in VRAM | Repo documents ~25–29.4 GB even in its tight Blackwell FP4 profiles |
+The WebRTC connection stays live, but this milestone is **prepare, then play**:
+JoyVASA processes the complete utterance before playback starts. It is a useful
+end-to-end test, not yet a sub-second, chunk-by-chunk animation pipeline.
 
-Docker isolates software; it cannot increase physical VRAM.
+## Prerequisites
 
-## Host setup
+- Linux host with Docker Engine, Compose v2, NVIDIA Container Toolkit, and a
+  recent NVIDIA driver suitable for CUDA 12.8 / RTX 5080.
+- Enough disk for FasterLivePortrait, JoyVASA, and Breeze TTS 2 checkpoints.
+- Research/non-commercial use unless you have separately obtained appropriate
+  model rights. Breeze TTS 2 open weights and self-hosted output are licensed
+  for research and non-commercial use.
 
-### Windows 11
+## Start
 
-Use a current NVIDIA Windows driver plus Docker Desktop with the WSL2 backend and GPU support enabled. Do **not** install a Linux NVIDIA display driver inside WSL; the Windows driver is exposed into WSL.
+Put a clear, front-facing image at:
 
-### Linux
-
-Install a current NVIDIA driver, Docker, and NVIDIA Container Toolkit. Verify the host can run:
-
-```bash
-docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+```text
+inputs/avatar.jpg
 ```
 
-## Build
+Then run:
 
 ```bash
+mkdir -p inputs checkpoints models results
 docker compose build
+docker compose up
 ```
 
-The build intentionally compiles FlashAttention from source with `sm_120` as the target architecture. This is more reliable for RTX 50-series than relying on older prebuilt FlashAttention wheels.
+The first start downloads all model checkpoints and can take a long time. Open
+`http://localhost:8000`, click **Enable audio**, then generate a short sentence.
 
-If you only want Sana image inference and want a faster/lighter build:
+The Compose file uses host networking because aiortc opens dynamic UDP sockets;
+publishing only TCP port 8000 is not enough for WebRTC media from a Docker bridge.
+Host networking is intended for this Linux test setup. For internet deployment,
+put the HTTP endpoint behind TLS and configure a TURN server through
+`ICE_SERVERS_JSON`.
+
+## Verify and diagnose
+
+Check the service health payload:
 
 ```bash
-docker compose build --build-arg INSTALL_FLASH_ATTN=0
+curl http://127.0.0.1:8000/health
 ```
 
-To additionally attempt Transformer Engine (useful for SANA-WM fp8/fp4, but SANA-WM still does not fit 16 GB):
+Healthy output should name the RTX 5080 and include `CUDAExecutionProvider`.
+Useful logs:
 
 ```bash
-docker compose build --build-arg INSTALL_TRANSFORMER_ENGINE=1
+docker compose logs -f model-init
+docker compose logs -f breeze-tts
+docker compose logs -f webrtc-avatar
+nvidia-smi
 ```
 
-## Verify GPU + CUDA
+If the avatar service reports no CUDA execution provider, the ONNX models may
+fall back to CPU. FasterLivePortrait's upstream ONNX path has historically had
+special handling for five-dimensional `grid_sample`; this is the most likely
+GPU compatibility point to investigate on a new Blackwell card.
 
-```bash
-docker compose run --rm sana python /opt/launchers/verify_gpu.py
-```
+If the GPU runs out of memory, keep Breeze's `--fast-all` option disabled (the
+provided configuration does) and test with one browser/client. The two services
+intentionally use separate containers because Breeze requires NumPy 2.x while
+the portrait stack is pinned to NumPy 1.26.
 
-You want to see:
+FlashAttention 2 is deliberately not installed in the Breeze image: its
+documented CUDA support covers Ampere, Ada, and Hopper, while the RTX 5080 is
+Blackwell (`sm_120`). This test therefore uses Breeze's supported eager path on
+PyTorch 2.9.1 / CUDA 12.8.
 
-- GPU name: RTX 5080 Laptop GPU
-- compute capability: `sm_120`
-- PyTorch CUDA: `12.8`
-- `sm_120` present in `torch.cuda.get_arch_list()`
-- BF16 matmul: OK
+## What to improve next
 
-## Generate a 1024×1024 image
-
-```bash
-docker compose run --rm sana python /opt/launchers/image.py \
-  --prompt "cinematic photo of a futuristic Amsterdam canal at blue hour, highly detailed"
-```
-
-Output: `./outputs/sana.png`
-
-If you hit an OOM because the desktop/browser/other apps are consuming VRAM:
-
-```bash
-docker compose run --rm sana python /opt/launchers/image.py \
-  --offload model \
-  --prompt "cinematic photo of a futuristic Amsterdam canal at blue hour, highly detailed"
-```
-
-For maximum memory savings (much slower), use `--offload sequential`.
-
-## Generate SANA-Video at a conservative 480p profile
-
-```bash
-docker compose run --rm sana python /opt/launchers/video.py \
-  --prompt "A small robot walks through a rainy neon alley, cinematic camera movement"
-```
-
-The launcher starts at 49 frames and model CPU offload. If stable, try the repo's 81-frame example:
-
-```bash
-docker compose run --rm sana python /opt/launchers/video.py \
-  --frames 81 \
-  --prompt "A small robot walks through a rainy neon alley, cinematic camera movement"
-```
-
-If it still OOMs, use `--offload sequential`, reduce `--frames`, or reduce width/height. CPU offload also needs adequate system RAM and is slower than keeping everything on the GPU.
-
-## Run the Sana repo directly
-
-The full Sana checkout is at `/opt/Sana` inside the image:
-
-```bash
-docker compose run --rm sana bash
-cd /opt/Sana
-```
-
-Then you can run the upstream scripts/configs directly. Hugging Face downloads persist under `./cache/huggingface` and outputs under `./outputs`.
-
-## Pin Sana to a commit/tag
-
-For reproducibility, edit `SANA_REF` in `compose.yaml`, or build with:
-
-```bash
-docker build --build-arg SANA_REF=<git-tag-or-commit> -t sana-5080:cu128 .
-```
-
-## Notes
-
-- The image is large because it uses the PyTorch CUDA **devel** base so CUDA extensions can compile for `sm_120`.
-- The default `INSTALL_TRANSFORMER_ENGINE=0` is intentional: the 5080 Laptop has 16 GB VRAM and SANA-WM's documented low-precision configurations still exceed it.
-- "Perfect" execution depends on host driver version, laptop GPU power limit/thermals, system RAM, and the exact Sana checkpoint. The included smoke test verifies the CUDA/PyTorch/Blackwell path before downloading large models.
+- Replace JoyVASA's whole-utterance motion generation with a stateful sliding
+  window and feed rendered frames directly into the WebRTC buffer.
+- Add bounded backpressure instead of storing an entire rendered clip in RAM.
+- Add TURN/TLS for clients outside the Docker host or local network.
+- Benchmark ONNX Runtime against a Blackwell-compatible TensorRT engine once the
+  FasterLivePortrait plugin path supports the installed TensorRT generation.

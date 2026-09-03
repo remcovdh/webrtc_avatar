@@ -1,7 +1,7 @@
-"""WebRTC test server for a Breeze TTS 2 + JoyVASA + FasterLivePortrait avatar.
+"""Progressive WebRTC avatar server using Breeze TTS 2 and FasterLivePortrait.
 
-The neural stages currently prepare a complete utterance before playback. Once
-prepared, audio and video are paced together over a persistent WebRTC session.
+Each request is divided into short phrases. The first completed phrase starts
+playing immediately while later phrases are synthesized and rendered.
 """
 
 from __future__ import annotations
@@ -42,10 +42,19 @@ from omegaconf import OmegaConf
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 
 LOG = logging.getLogger("avatar")
+SERVER_BUILD = "progressive-phrase-v1"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 ROOT = Path(__file__).resolve().parent
 AVATAR_PATH = Path(os.getenv("AVATAR_PATH", "/workspace/inputs/avatar.jpg"))
@@ -64,12 +73,15 @@ TTS_INSTRUCTION = os.getenv(
 TTS_CFG_SCALE = float(os.getenv("BREEZE_CFG_SCALE", "4"))
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
-AVATAR_PASTE_BACK = os.getenv("AVATAR_PASTE_BACK", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
+PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
+PHRASE_FIRST_TARGET_CHARS = max(
+    8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
+)
+PHRASE_TARGET_CHARS = max(16, int(os.getenv("PHRASE_TARGET_CHARS", "100")))
+PHRASE_MAX_CHARS = max(
+    PHRASE_TARGET_CHARS, int(os.getenv("PHRASE_MAX_CHARS", "160"))
+)
 VIDEO_FPS = 30
 AUDIO_RATE = 48_000
 AUDIO_SAMPLES = 960  # 20 ms at 48 kHz
@@ -148,18 +160,78 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     return loaded
 
 
+def _split_phrases(text: str) -> list[str]:
+    """Split text into low-latency phrases without losing punctuation."""
+    normalized = " ".join(text.split())
+    if not normalized:
+        return []
+    if not PROGRESSIVE_PHRASE_MODE:
+        return [normalized]
+
+    phrases: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    closing_marks = "\"'”’)]}"
+
+    for word in normalized.split(" "):
+        current.append(word)
+        current_length += len(word) + (1 if len(current) > 1 else 0)
+        ending = word.rstrip(closing_marks)
+        terminal = ending.endswith((".", "!", "?", ";", ":"))
+        soft_break = ending.endswith(",")
+        target = PHRASE_FIRST_TARGET_CHARS if not phrases else PHRASE_TARGET_CHARS
+
+        if (
+            terminal
+            or current_length >= PHRASE_MAX_CHARS
+            or current_length >= target
+            or (soft_break and current_length >= max(12, target // 2))
+        ):
+            phrases.append(" ".join(current))
+            current = []
+            current_length = 0
+
+    if current:
+        tail = " ".join(current)
+        if (
+            phrases
+            and len(tail) < 12
+            and len(phrases[-1]) + 1 + len(tail) <= PHRASE_MAX_CHARS
+        ):
+            phrases[-1] = f"{phrases[-1]} {tail}"
+        else:
+            phrases.append(tail)
+
+    return phrases
+
+
 class PlaybackBuffer:
     """Per-peer playback state consumed by the two WebRTC tracks."""
 
     def __init__(self) -> None:
         self.video: deque[np.ndarray] = deque()
         self.audio: deque[np.ndarray] = deque()
+        self.producing = False
+        self.started = False
+        self.last_video = BASE_AVATAR
+        self.audio_underruns = 0
+        self.video_underruns = 0
 
     @property
     def busy(self) -> bool:
-        return bool(self.video or self.audio)
+        return self.producing or bool(self.video or self.audio)
 
-    def load(self, frames: list[np.ndarray], fps: float, pcm_24k: np.ndarray) -> float:
+    @property
+    def buffered_seconds(self) -> float:
+        video_seconds = len(self.video) / VIDEO_FPS
+        audio_seconds = len(self.audio) * AUDIO_SAMPLES / AUDIO_RATE
+        return min(video_seconds, audio_seconds)
+
+    def begin(self) -> None:
+        self.clear()
+        self.producing = True
+
+    def append(self, frames: list[np.ndarray], fps: float, pcm_24k: np.ndarray) -> float:
         if not frames:
             raise ValueError("The animation renderer returned no video frames")
         if fps <= 0:
@@ -175,30 +247,46 @@ class PlaybackBuffer:
             (np.arange(target_count) * fps / VIDEO_FPS).astype(int),
             len(frames) - 1,
         )
-        self.video = deque(frames[index] for index in video_indices)
+        self.video.extend(frames[index] for index in video_indices)
 
-        chunks: deque[np.ndarray] = deque()
         required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
         padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
         for offset in range(0, len(padded), AUDIO_SAMPLES):
             chunk = padded[offset : offset + AUDIO_SAMPLES]
             if len(chunk) < AUDIO_SAMPLES:
                 chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
-            chunks.append(chunk.reshape(1, -1))
-        self.audio = chunks
+            self.audio.append(chunk.reshape(1, -1))
+        self.started = True
         return duration
 
+    def finish(self) -> None:
+        self.producing = False
+
     def next_video(self) -> np.ndarray:
-        return self.video.popleft() if self.video else BASE_AVATAR
+        if self.video:
+            self.last_video = self.video.popleft()
+            return self.last_video
+        if self.started and (self.producing or self.audio):
+            if self.producing:
+                self.video_underruns += 1
+            return self.last_video
+        return BASE_AVATAR
 
     def next_audio(self) -> np.ndarray:
         if self.audio:
             return self.audio.popleft()
+        if self.started and self.producing:
+            self.audio_underruns += 1
         return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
 
     def clear(self) -> None:
         self.video.clear()
         self.audio.clear()
+        self.producing = False
+        self.started = False
+        self.last_video = BASE_AVATAR
+        self.audio_underruns = 0
+        self.video_underruns = 0
 
 
 class AvatarVideoTrack(VideoStreamTrack):
@@ -316,44 +404,149 @@ async def _create_clip(
         await _send_event(channel, "error", message="Wait for the current speech to finish.")
         return
 
+    phrases = _split_phrases(text)
+    if not phrases:
+        await _send_event(channel, "error", message="Enter text to speak.")
+        return
+
+    playback.begin()
+    request_started = time.perf_counter()
+    total_tts = 0.0
+    total_render = 0.0
+
+    await _send_event(
+        channel,
+        "plan",
+        message=f"Prepared {len(phrases)} progressive phrase{'s' if len(phrases) != 1 else ''}",
+        phrases=phrases,
+    )
+
     if inference_lock.locked():
         await _send_event(channel, "status", phase="queued", message="Queued behind another request…")
 
     try:
         async with inference_lock:
-            await _send_event(channel, "status", phase="tts", message="Generating speech…")
             RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="avatar-", dir=RESULTS_ROOT) as tmp:
                 tmp_dir = Path(tmp)
-                pcm = await _synthesize(
-                    text,
-                    instruction or TTS_INSTRUCTION,
-                    tmp_dir / "speech.pcm",
-                    tmp_dir / "speech.wav",
-                )
-                await _send_event(
-                    channel,
-                    "status",
-                    phase="animation",
-                    message="Generating neural facial motion…",
-                )
-                frames, fps = await asyncio.to_thread(
-                    _render_animation, tmp_dir / "speech.wav", tmp_dir
-                )
-                duration = playback.load(frames, fps, pcm)
+                for index, phrase in enumerate(phrases, start=1):
+                    chunk_dir = tmp_dir / f"chunk-{index:03d}"
+                    chunk_dir.mkdir()
+                    pcm_path = chunk_dir / "speech.pcm"
+                    wav_path = chunk_dir / "speech.wav"
+                    underruns_before = playback.audio_underruns
+                    video_underruns_before = playback.video_underruns
 
+                    await _send_event(
+                        channel,
+                        "status",
+                        phase="tts",
+                        chunk=index,
+                        chunks=len(phrases),
+                        message=f"Phrase {index}/{len(phrases)}: generating speech…",
+                    )
+                    started = time.perf_counter()
+                    pcm = await _synthesize(
+                        phrase,
+                        instruction or TTS_INSTRUCTION,
+                        pcm_path,
+                        wav_path,
+                    )
+                    tts_seconds = time.perf_counter() - started
+                    total_tts += tts_seconds
+
+                    await _send_event(
+                        channel,
+                        "status",
+                        phase="animation",
+                        chunk=index,
+                        chunks=len(phrases),
+                        message=f"Phrase {index}/{len(phrases)}: rendering facial motion…",
+                    )
+                    started = time.perf_counter()
+                    frames, fps = await asyncio.to_thread(
+                        _render_animation, wav_path, chunk_dir
+                    )
+                    render_seconds = time.perf_counter() - started
+                    total_render += render_seconds
+                    media_duration = playback.append(frames, fps, pcm)
+                    first_ready_ms = (
+                        round((time.perf_counter() - request_started) * 1000)
+                        if index == 1
+                        else None
+                    )
+                    underrun_ms = (
+                        playback.audio_underruns - underruns_before
+                    ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
+                    video_underrun_ms = (
+                        playback.video_underruns - video_underruns_before
+                    ) / VIDEO_FPS * 1000
+
+                    LOG.info(
+                        "Phrase %d/%d timings: tts=%.3fs render=%.3fs media=%.3fs buffer=%.3fs underrun=%.0fms",
+                        index,
+                        len(phrases),
+                        tts_seconds,
+                        render_seconds,
+                        media_duration,
+                        playback.buffered_seconds,
+                        underrun_ms,
+                    )
+                    await _send_event(
+                        channel,
+                        "metrics",
+                        chunk=index,
+                        chunks=len(phrases),
+                        phrase=phrase,
+                        tts_ms=round(tts_seconds * 1000),
+                        render_ms=round(render_seconds * 1000),
+                        media_seconds=round(media_duration, 3),
+                        buffered_seconds=round(playback.buffered_seconds, 3),
+                        underrun_ms=round(underrun_ms),
+                        video_underrun_ms=round(video_underrun_ms),
+                        first_ready_ms=first_ready_ms,
+                    )
+
+                    if index == 1:
+                        await _send_event(
+                            channel,
+                            "playing",
+                            message=f"Playing phrase 1/{len(phrases)} while preparing the rest…",
+                            duration=round(media_duration, 3),
+                            first_ready_ms=first_ready_ms,
+                        )
+
+        playback.finish()
+        generation_seconds = time.perf_counter() - request_started
         await _send_event(
             channel,
-            "playing",
-            message="Playing synchronized avatar stream",
-            duration=round(duration, 3),
+            "status",
+            phase="draining",
+            message="All phrases generated; finishing playback…",
         )
-        await asyncio.sleep(duration + 0.25)
+        while playback.busy:
+            await asyncio.sleep(0.05)
+
+        total_seconds = time.perf_counter() - request_started
+        await _send_event(
+            channel,
+            "summary",
+            message="Progressive playback complete",
+            chunks=len(phrases),
+            tts_ms=round(total_tts * 1000),
+            render_ms=round(total_render * 1000),
+            generation_ms=round(generation_seconds * 1000),
+            total_ms=round(total_seconds * 1000),
+            underrun_ms=round(
+                playback.audio_underruns * AUDIO_SAMPLES / AUDIO_RATE * 1000
+            ),
+        )
         await _send_event(channel, "ready", message="Ready")
     except asyncio.CancelledError:
         playback.clear()
         raise
     except Exception as exc:
+        playback.clear()
         LOG.exception("Avatar generation failed")
         await _send_event(channel, "error", message=str(exc))
 
@@ -396,6 +589,7 @@ async def health() -> JSONResponse:
 
     providers = ort.get_available_providers()
     body = {
+        "server_build": SERVER_BUILD,
         "ok": startup_error is None and tts_ready,
         "avatar_ready": startup_error is None,
         "tts_ready": tts_ready,
@@ -406,6 +600,10 @@ async def health() -> JSONResponse:
         "onnx_providers": providers,
         "cuda_provider": "CUDAExecutionProvider" in providers,
         "paste_back": AVATAR_PASTE_BACK,
+        "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
+        "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
+        "phrase_target_chars": PHRASE_TARGET_CHARS,
+        "phrase_max_chars": PHRASE_MAX_CHARS,
         "error": startup_error,
     }
     return JSONResponse(body, status_code=200 if body["ok"] else 503)
