@@ -56,6 +56,10 @@ services:
       # The crop contains the animated face and avoids the per-frame cuSOLVER
       # matrix inverse used to composite it back into the original photograph.
       AVATAR_PASTE_BACK: "false"
+      # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
+      # browser can submit its first request. Failure is reported but nonfatal.
+      STARTUP_WARMUP: "true"
+      WARMUP_TEXT: "Hello."
       # Progressive phrase playback: generate phrase 1, start playback, then
       # generate later phrases while the current media queue is consumed.
       PROGRESSIVE_PHRASE_MODE: "true"

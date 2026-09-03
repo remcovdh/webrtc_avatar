@@ -42,7 +42,7 @@ from omegaconf import OmegaConf
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "progressive-phrase-v1"
+SERVER_BUILD = "neural-avatar-v2a-warmup-metrics"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -74,6 +74,8 @@ TTS_CFG_SCALE = float(os.getenv("BREEZE_CFG_SCALE", "4"))
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
+STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
+WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
 PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
 PHRASE_FIRST_TARGET_CHARS = max(
     8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
@@ -90,6 +92,10 @@ pcs: set[RTCPeerConnection] = set()
 pipeline: GradioLivePortraitPipeline | None = None
 startup_error: str | None = None
 inference_lock = asyncio.Lock()
+warmup_complete = False
+warmup_seconds: float | None = None
+warmup_metrics: dict[str, Any] = {}
+warmup_error: str | None = None
 
 # JoyVASA's official motion checkpoint stores its configuration as an
 # argparse.Namespace. PyTorch 2.6+ blocks that class by default when loading
@@ -331,8 +337,13 @@ async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
         channel.send(json.dumps({"type": event_type, **payload}))
 
 
-async def _synthesize(text: str, instruction: str, pcm_path: Path, wav_path: Path) -> np.ndarray:
-    """Call Breeze's official endpoint and retain its raw 24 kHz PCM."""
+async def _synthesize(
+    text: str,
+    instruction: str,
+    pcm_path: Path,
+    wav_path: Path,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Call Breeze and report request, first-byte, transfer and finalize time."""
     form = {
         "text": (None, text),
         "instruction": (None, instruction),
@@ -340,10 +351,17 @@ async def _synthesize(text: str, instruction: str, pcm_path: Path, wav_path: Pat
         "seed": (None, str(TTS_SEED)),
     }
     timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
+    request_started = time.perf_counter()
+    headers_ready = request_started
+    first_byte_at: float | None = None
+    body_complete = request_started
+    bytes_received = 0
+
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
             "POST", f"{TTS_URL}/v1/audio/speech", files=form
         ) as response:
+            headers_ready = time.perf_counter()
             if response.is_error:
                 detail = (await response.aread()).decode("utf-8", errors="replace")[:300]
                 raise RuntimeError(
@@ -351,8 +369,13 @@ async def _synthesize(text: str, instruction: str, pcm_path: Path, wav_path: Pat
                 )
             with pcm_path.open("wb") as output:
                 async for chunk in response.aiter_bytes():
+                    if first_byte_at is None:
+                        first_byte_at = time.perf_counter()
+                    bytes_received += len(chunk)
                     output.write(chunk)
+            body_complete = time.perf_counter()
 
+    finalize_started = time.perf_counter()
     raw = pcm_path.read_bytes()
     if len(raw) < 2:
         raise RuntimeError("Breeze returned an empty audio stream")
@@ -364,21 +387,36 @@ async def _synthesize(text: str, instruction: str, pcm_path: Path, wav_path: Pat
         wav_file.setsampwidth(2)
         wav_file.setframerate(24_000)
         wav_file.writeframes(pcm.tobytes())
-    return pcm
+    complete = time.perf_counter()
+    first_byte_at = first_byte_at or body_complete
+    return pcm, {
+        "headers_ms": round((headers_ready - request_started) * 1000),
+        "first_byte_ms": round((first_byte_at - request_started) * 1000),
+        "download_ms": round((body_complete - first_byte_at) * 1000),
+        "finalize_ms": round((complete - finalize_started) * 1000),
+        "total_ms": round((complete - request_started) * 1000),
+        "bytes": bytes_received,
+    }
 
 
-def _render_animation(wav_path: Path, output_dir: Path) -> tuple[list[np.ndarray], float]:
+def _render_animation(
+    wav_path: Path,
+    output_dir: Path,
+) -> tuple[list[np.ndarray], float, dict[str, float | int]]:
     if pipeline is None:
         raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
 
-    original_path, crop_path, _elapsed = pipeline.run_audio_driving(
+    render_started = time.perf_counter()
+    original_path, crop_path, reported_elapsed = pipeline.run_audio_driving(
         str(wav_path), str(AVATAR_PATH), save_dir=str(output_dir)
     )
+    pipeline_seconds = time.perf_counter() - render_started
     video_path = original_path if AVATAR_PASTE_BACK else crop_path
     LOG.info(
         "Using %s animation output",
         "full-frame paste-back" if AVATAR_PASTE_BACK else "face crop",
     )
+    decode_started = time.perf_counter()
     capture = cv2.VideoCapture(str(video_path))
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
     frames: list[np.ndarray] = []
@@ -388,7 +426,15 @@ def _render_animation(wav_path: Path, output_dir: Path) -> tuple[list[np.ndarray
             break
         frames.append(_letterbox(frame))
     capture.release()
-    return frames, fps
+    decode_seconds = time.perf_counter() - decode_started
+    return frames, fps, {
+        "pipeline_ms": round(pipeline_seconds * 1000),
+        "decode_ms": round(decode_seconds * 1000),
+        "total_ms": round((time.perf_counter() - render_started) * 1000),
+        "pipeline_reported_ms": round(float(reported_elapsed or 0) * 1000),
+        "frames": len(frames),
+        "source_fps": round(fps, 3),
+    }
 
 
 async def _create_clip(
@@ -446,7 +492,7 @@ async def _create_clip(
                         message=f"Phrase {index}/{len(phrases)}: generating speech…",
                     )
                     started = time.perf_counter()
-                    pcm = await _synthesize(
+                    pcm, tts_detail = await _synthesize(
                         phrase,
                         instruction or TTS_INSTRUCTION,
                         pcm_path,
@@ -464,7 +510,7 @@ async def _create_clip(
                         message=f"Phrase {index}/{len(phrases)}: rendering facial motion…",
                     )
                     started = time.perf_counter()
-                    frames, fps = await asyncio.to_thread(
+                    frames, fps, render_detail = await asyncio.to_thread(
                         _render_animation, wav_path, chunk_dir
                     )
                     render_seconds = time.perf_counter() - started
@@ -483,11 +529,18 @@ async def _create_clip(
                     ) / VIDEO_FPS * 1000
 
                     LOG.info(
-                        "Phrase %d/%d timings: tts=%.3fs render=%.3fs media=%.3fs buffer=%.3fs underrun=%.0fms",
+                        "Phrase %d/%d timings: tts=%.3fs first_byte=%dms download=%dms "
+                        "render=%.3fs pipeline=%dms decode=%dms frames=%d media=%.3fs "
+                        "buffer=%.3fs underrun=%.0fms",
                         index,
                         len(phrases),
                         tts_seconds,
+                        tts_detail["first_byte_ms"],
+                        tts_detail["download_ms"],
                         render_seconds,
+                        render_detail["pipeline_ms"],
+                        render_detail["decode_ms"],
+                        render_detail["frames"],
                         media_duration,
                         playback.buffered_seconds,
                         underrun_ms,
@@ -499,7 +552,19 @@ async def _create_clip(
                         chunks=len(phrases),
                         phrase=phrase,
                         tts_ms=round(tts_seconds * 1000),
+                        tts_headers_ms=tts_detail["headers_ms"],
+                        tts_first_byte_ms=tts_detail["first_byte_ms"],
+                        tts_download_ms=tts_detail["download_ms"],
+                        tts_finalize_ms=tts_detail["finalize_ms"],
+                        tts_bytes=tts_detail["bytes"],
                         render_ms=round(render_seconds * 1000),
+                        render_pipeline_ms=render_detail["pipeline_ms"],
+                        render_decode_ms=render_detail["decode_ms"],
+                        render_pipeline_reported_ms=render_detail[
+                            "pipeline_reported_ms"
+                        ],
+                        render_frames=render_detail["frames"],
+                        render_source_fps=render_detail["source_fps"],
                         media_seconds=round(media_duration, 3),
                         buffered_seconds=round(playback.buffered_seconds, 3),
                         underrun_ms=round(underrun_ms),
@@ -551,6 +616,57 @@ async def _create_clip(
         await _send_event(channel, "error", message=str(exc))
 
 
+async def _warmup_pipeline() -> None:
+    """Exercise the same TTS, JoyVASA and renderer path before the first user."""
+    global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
+
+    started = time.perf_counter()
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    LOG.info("Startup warm-up begins with %r", WARMUP_TEXT)
+    try:
+        with tempfile.TemporaryDirectory(prefix="warmup-", dir=RESULTS_ROOT) as tmp:
+            warmup_dir = Path(tmp)
+            pcm_path = warmup_dir / "warmup.pcm"
+            wav_path = warmup_dir / "warmup.wav"
+            pcm, tts_detail = await _synthesize(
+                WARMUP_TEXT,
+                TTS_INSTRUCTION,
+                pcm_path,
+                wav_path,
+            )
+            frames, fps, render_detail = await asyncio.to_thread(
+                _render_animation,
+                wav_path,
+                warmup_dir,
+            )
+            warmup_seconds = time.perf_counter() - started
+            warmup_metrics = {
+                "tts": tts_detail,
+                "render": render_detail,
+                "media_seconds": round(
+                    max(len(pcm) / 24_000, len(frames) / max(fps, 1.0)),
+                    3,
+                ),
+            }
+            warmup_complete = True
+            LOG.info(
+                "Startup warm-up complete: total=%.3fs tts=%dms pipeline=%dms "
+                "decode=%dms frames=%d",
+                warmup_seconds,
+                tts_detail["total_ms"],
+                render_detail["pipeline_ms"],
+                render_detail["decode_ms"],
+                render_detail["frames"],
+            )
+    except Exception as exc:
+        warmup_seconds = time.perf_counter() - started
+        warmup_error = str(exc)
+        LOG.exception(
+            "Startup warm-up failed after %.3fs; continuing without warm-up",
+            warmup_seconds,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global BASE_AVATAR, pipeline, startup_error
@@ -558,6 +674,8 @@ async def lifespan(_app: FastAPI):
         BASE_AVATAR = _load_avatar()
         LOG.info("Loading FasterLivePortrait and source portrait")
         pipeline = await asyncio.to_thread(_initialize_pipeline)
+        if STARTUP_WARMUP:
+            await _warmup_pipeline()
         LOG.info("Avatar pipeline is ready")
     except Exception as exc:
         startup_error = str(exc)
@@ -600,6 +718,13 @@ async def health() -> JSONResponse:
         "onnx_providers": providers,
         "cuda_provider": "CUDAExecutionProvider" in providers,
         "paste_back": AVATAR_PASTE_BACK,
+        "startup_warmup_enabled": STARTUP_WARMUP,
+        "startup_warmup_complete": warmup_complete,
+        "startup_warmup_seconds": (
+            round(warmup_seconds, 3) if warmup_seconds is not None else None
+        ),
+        "startup_warmup_metrics": warmup_metrics,
+        "startup_warmup_error": warmup_error,
         "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
         "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
         "phrase_target_chars": PHRASE_TARGET_CHARS,
