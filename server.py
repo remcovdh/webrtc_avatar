@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2d-voice-modes"
+SERVER_BUILD = "neural-avatar-v2e1-benchmark-handshake-fix"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -1261,11 +1261,26 @@ async def offer(request: Request) -> JSONResponse:
     def on_datachannel(channel: Any) -> None:
         LOG.info("Data channel connected: %s", channel.label)
 
-        @channel.on("open")
-        def on_open() -> None:
+        ready_announced = False
+
+        def announce_ready() -> None:
+            """Send ready even when aiortc reports the channel already open."""
+            nonlocal ready_announced
+            if ready_announced or getattr(channel, "readyState", None) != "open":
+                return
+            ready_announced = True
             task = asyncio.create_task(_send_event(channel, "ready", message="Ready"))
             jobs.add(task)
             task.add_done_callback(jobs.discard)
+
+        @channel.on("open")
+        def on_open() -> None:
+            announce_ready()
+
+        # A remotely-created RTCDataChannel can already be open when the
+        # datachannel callback runs, in which case its open event is not seen by
+        # this newly attached handler. Check the state on the next loop turn.
+        asyncio.get_running_loop().call_soon(announce_ready)
 
         @channel.on("message")
         def on_message(message: Any) -> None:

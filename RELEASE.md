@@ -1,58 +1,69 @@
-# neural-avatar-v2d-voice-modes
+# neural-avatar-v2e1-benchmark-handshake-fix
+
+## v2E.1 correction
+
+- Fixes the smoke-test timeout after WebRTC connected successfully but the
+  server did not emit its initial `ready` event.
+- The server now announces readiness both from the channel `open` callback and
+  from an immediate ready-state check, guarded against duplicate events.
+- The benchmark treats its locally open data channel as authoritative and
+  continues after a two-second compatibility wait when an older server omits
+  the optional event.
+- `test_benchmark_handshake.py` covers both a received `ready` message and the
+  missing-message compatibility path.
 
 ## Purpose
 
-Compare voice consistency and Breeze TTS cost without changing the accepted
-serial, direct-memory, stride-two avatar renderer.
+Replace ad-hoc timing comparisons with a repeatable end-to-end harness while
+preserving all v2D voice choices and the accepted serial renderer defaults.
 
-## Changed
+## Added
 
-- Added browser-selectable `design`, `preset-clone` and `preset-direction`
-  modes.
-- A preset can be an authorized WAV or one Breeze-designed sentence generated
-  once; both use the same fixed WAV plus exact-transcript configuration.
-- Preset files are server-controlled. The browser selects a mode but cannot
-  supply a path.
-- Designed voice defaults to CFG 4, preset clone to CFG 1, and preset direction
-  to CFG 4.
-- Preset options remain visibly disabled until both `voice-preset.wav` and
-  `voice-preset.txt` are valid.
-- Added Voice and CFG to per-phrase UI metrics and server logs.
-- Added voice configuration and preset readiness to `/health` and
-  `/client-config`.
-- Changed `TTS_PREFETCH` default to `false` after v2C-B shared-GPU contention
-  approximately halved portrait inference speed.
-- Documented preset generation, external reference setup, exact rollback,
-  v2C-B rejection, the recovered serial baseline, and the v2D A/B procedure.
+- `benchmark_avatar.py` with two commands:
+  - `prepare-preset` generates a deterministic Breeze WAV, exact transcript and
+    SHA-256 manifest;
+  - `run` negotiates the real WebRTC endpoint, consumes media, sends the same
+    data-channel request as the UI, and captures every server event.
+- `benchmark.sh` orchestrates Breeze, optional fixture creation, avatar
+  recreation, health checks, per-mode warm-ups and measured runs.
+- JSON, phrase CSV and Markdown output under `results/benchmarks/`, plus a
+  timestamped cross-scenario comparison CSV and Markdown table.
+- Median first-ready/first-byte timing, TTS RTF, render RTF, weighted neural
+  FPS, media duration, gap and wall-time comparisons.
+- Configurable repeat, warm-up, voice-mode, render-stride and prefetch matrices.
+- A Compose `benchmark-fixture` profile with write access only to the fixture
+  and result volumes.
+- Namespaced Compose overrides for stride, prefetch and phrase thresholds.
+
+## Reproducibility controls
+
+- Fixed preset text, instruction, CFG and seed.
+- Fixed benchmark text and directions.
+- Identical test text for all modes.
+- One warm-up per mode is recorded but excluded from medians.
+- Measured modes rotate within each repeat rather than being tested in isolated
+  batches.
+- Complete health/config snapshots and raw data-channel events are retained.
+- The canonical fixture uses dedicated `benchmark-voice-preset.*` files, so the
+  normal `voice-preset.*` pair is not touched.
+- `BENCHMARK_PRESET_BASENAME=voice-preset` can deliberately test the normal
+  preset without changing it.
 
 ## Deliberately not changed
 
-- Breeze itself is unmodified and re-encodes uploaded reference audio per
-  phrase; reference-token caching is a possible later experiment.
-- Phrase splitting, phrase-level batching, playback order and WebRTC formats.
-- JoyVASA and FasterLivePortrait model configuration.
-- Direct-memory render and stride two.
-- Paste-back remains disabled.
+- Voice generation, JoyVASA or FasterLivePortrait algorithms.
+- Direct-memory stride-two production defaults.
+- TTS prefetch remains disabled by default.
+- Breeze still re-encodes reference audio for every phrase.
+- Voice identity/naturalness and visual lip sync still need human assessment.
 - No phrase-boundary blend or incremental PCM/motion/frame delivery yet.
 
-## Expected result
+## First run
 
-- `/health` reports build `neural-avatar-v2d-voice-modes`, prefetch false and
-  all three mode IDs.
-- Without preset files, only Designed voice is selectable.
-- With a nonempty preset WAV and exact transcript, clone and direction modes
-  become selectable after recreating `webrtc-avatar`.
-- Every phrase timing row identifies its voice mode and CFG scale.
-- Preset modes should stabilize voice identity; whether clone CFG 1 also lowers
-  TTS time is intentionally left for measurement.
-
-## Rollback
-
-Select Designed voice in the browser or set:
-
-```yaml
-BREEZE_DEFAULT_VOICE_MODE: "design"
-TTS_PREFETCH: "false"
+```bash
+docker compose build webrtc-avatar benchmark-fixture
+./benchmark.sh
 ```
 
-Then recreate `webrtc-avatar`. No rebuild is required for a runtime rollback.
+Use `REGENERATE_PRESET=1 ./benchmark.sh` only when intentionally regenerating
+the selected benchmark preset basename.

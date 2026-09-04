@@ -110,7 +110,7 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py test_benchmark_handshake.py /workspace/FasterLivePortrait/
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 

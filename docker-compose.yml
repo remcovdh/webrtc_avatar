@@ -61,10 +61,10 @@ services:
       DIRECT_MEMORY_RENDER: "true"
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
-      RENDER_STRIDE: "2"
+      RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-2}"
       # v2C-B testing showed that concurrent TTS approximately halved portrait
-      # FPS on the shared laptop GPU. Keep serial scheduling for v2D.
-      TTS_PREFETCH: "false"
+      # FPS on the shared laptop GPU. Keep serial scheduling for v2E.
+      TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-false}"
       # Voice modes exposed in the browser:
       #   design           = reference-free voice design with CFG 4
       #   preset-clone     = fixed reference identity with CFG 1
@@ -78,8 +78,8 @@ services:
       # A generated Breeze sentence or an owned/licensed WAV can be the preset.
       # Preset modes become selectable only when both the WAV and its exact
       # transcript file exist in ./inputs.
-      BREEZE_PRESET_AUDIO_PATH: /workspace/inputs/voice-preset.wav
-      BREEZE_PRESET_TRANSCRIPT_FILE: /workspace/inputs/voice-preset.txt
+      BREEZE_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset.wav}"
+      BREEZE_PRESET_TRANSCRIPT_FILE: "${AVATAR_PRESET_TRANSCRIPT_FILE:-/workspace/inputs/voice-preset.txt}"
       # Optional alternative to the .txt file; leave empty to read the file.
       BREEZE_PRESET_TRANSCRIPT: ""
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
@@ -93,9 +93,9 @@ services:
       # Progressive phrase playback: generate phrase 1, start playback, then
       # generate later phrases while the current media queue is consumed.
       PROGRESSIVE_PHRASE_MODE: "true"
-      PHRASE_FIRST_TARGET_CHARS: "48"
-      PHRASE_TARGET_CHARS: "100"
-      PHRASE_MAX_CHARS: "160"
+      PHRASE_FIRST_TARGET_CHARS: "${AVATAR_PHRASE_FIRST_TARGET_CHARS:-48}"
+      PHRASE_TARGET_CHARS: "${AVATAR_PHRASE_TARGET_CHARS:-100}"
+      PHRASE_MAX_CHARS: "${AVATAR_PHRASE_MAX_CHARS:-160}"
       # For remote/NAT clients, set a TURN server JSON array here.
       ICE_SERVERS_JSON: "[]"
     volumes:
@@ -114,3 +114,22 @@ services:
       retries: 20
       start_period: 180s
     restart: unless-stopped
+
+  # Invoked by benchmark.sh only. It uses the avatar image for httpx and WAV
+  # tooling, writes the fixed Breeze-generated preset into ./inputs, and exits.
+  benchmark-fixture:
+    profiles: ["benchmark"]
+    build: *avatar-build
+    image: neural-avatar:latest
+    network_mode: host
+    command:
+      - python
+      - /workspace/FasterLivePortrait/benchmark_avatar.py
+      - prepare-preset
+    volumes:
+      - ./inputs:/workspace/inputs
+      - ./results:/workspace/results
+    depends_on:
+      breeze-tts:
+        condition: service_healthy
+    restart: "no"

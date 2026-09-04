@@ -1,13 +1,14 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2d-voice-modes`
+Current build: `neural-avatar-v2e1-benchmark-handshake-fix`
 
-This archive is v2D of the latency optimization series. It retains the proven
-stride-two direct renderer, disables harmful shared-GPU TTS prefetch, and adds
-three selectable Breeze voice modes: reference-free design, preset clone, and
-preset direction. A preset may be an owned/licensed recording or one good
-Breeze-designed sentence generated once and then reused with its exact
-transcript.
+This archive is v2E.1 of the latency optimization series. It retains all v2D
+voice modes, adds the v2E repeatable headless benchmark, and fixes its initial
+WebRTC readiness handshake. One command can generate
+a deterministic Breeze reference fixture, exercise the same WebRTC/API path as
+the browser, run identical text through every voice mode, and save JSON, CSV
+and Markdown results. Optional stride/prefetch matrices make future changes
+comparable without replacing occasional listening tests.
 
 This project is a working test of a browser-delivered talking avatar:
 
@@ -43,6 +44,9 @@ underrun in the UI.
 ```text
 .
 ├── Dockerfile
+├── benchmark.sh
+├── benchmark_avatar.py
+├── test_benchmark_handshake.py
 ├── docker-compose.yml
 ├── entrypoint.sh
 ├── index.html
@@ -95,7 +99,7 @@ Expected progressive fields:
 
 ```json
 {
-  "server_build": "neural-avatar-v2d-voice-modes",
+  "server_build": "neural-avatar-v2e1-benchmark-handshake-fix",
   "render_backend": "direct-memory",
   "direct_memory_render": true,
   "render_stride": 2,
@@ -114,6 +118,106 @@ Expected progressive fields:
   "phrase_target_chars": 100,
   "phrase_max_chars": 160
 }
+```
+
+## Repeatable end-to-end benchmark
+
+Build the new avatar image once, then run:
+
+```bash
+docker compose build webrtc-avatar benchmark-fixture
+./benchmark.sh
+```
+
+The harness intentionally uses the production path:
+
+1. starts and health-checks Breeze;
+2. generates a dedicated `benchmark-voice-preset.wav` and exact transcript
+   when the pair is missing;
+3. recreates the avatar with the selected scenario settings;
+4. negotiates `/offer` as a headless WebRTC client;
+5. consumes the real audio/video tracks and sends requests through the same
+   data channel as `index.html`;
+6. warms each selected voice mode once;
+7. runs the same benchmark text three times per mode in round-robin order;
+8. stores raw events, phrase rows and median comparisons;
+9. combines all saved scenarios into a timestamped comparison CSV and Markdown
+   report.
+
+Your normal `voice-preset.wav/.txt` pair is never replaced by the default test.
+To intentionally regenerate only the dedicated canonical benchmark fixture,
+run:
+
+```bash
+REGENERATE_PRESET=1 ./benchmark.sh
+```
+
+The fixture uses a fixed sentence, instruction, CFG 4 and seed 42. Its manifest
+records the exact inputs, audio duration, creation timing and SHA-256 hashes.
+The runner uses separate but fixed benchmark text for all voice modes, so the
+reference prompt is not accidentally favored by repeating its own transcript.
+
+Each scenario creates a timestamped directory:
+
+```text
+results/benchmarks/
+├── comparison-20260903T211500Z.csv
+├── comparison-20260903T211500Z.md
+└── stride-2_prefetch-false/
+    └── 20260903T210000Z/
+        ├── benchmark.json  # environment, fixture, raw events and summaries
+        ├── phrases.csv     # one row per phrase
+        └── report.md       # median and per-run tables
+```
+
+Useful controls:
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `BENCHMARK_REPEATS` | `3` | Measured runs per mode. |
+| `BENCHMARK_WARMUPS` | `1` | Short unmeasured warm-ups per mode. This moves preset cold start out of measured results while retaining its raw warm-up record. |
+| `BENCHMARK_MODES` | all three modes | Comma-separated browser mode IDs. |
+| `BENCHMARK_RENDER_STRIDES` | `2` | Space-separated render-stride matrix. |
+| `BENCHMARK_PREFETCH_VALUES` | `false` | Space-separated `true`/`false` matrix. |
+| `REGENERATE_PRESET` | `0` | Set `1` to deliberately regenerate the selected benchmark preset pair. |
+| `BENCHMARK_BUILD` | `0` | Set `1` to rebuild benchmark/avatar images before running. |
+| `BENCHMARK_PRESET_BASENAME` | `benchmark-voice-preset` | Select the WAV/transcript basename under `inputs/`. Use `voice-preset` to benchmark your normal preset instead. |
+
+Examples:
+
+```bash
+# Quick smoke test: one measured run per mode
+BENCHMARK_REPEATS=1 ./benchmark.sh
+
+# Compare accepted stride two with full-frame stride one
+BENCHMARK_RENDER_STRIDES="2 1" ./benchmark.sh
+
+# Reproduce the rejected prefetch experiment as a separate scenario
+BENCHMARK_PREFETCH_VALUES="false true" ./benchmark.sh
+
+# Test only preset clone five times
+BENCHMARK_MODES="preset-clone" BENCHMARK_REPEATS=5 ./benchmark.sh
+
+# Benchmark your existing production preset without changing it
+BENCHMARK_PRESET_BASENAME=voice-preset ./benchmark.sh
+```
+
+The Markdown report compares first-ready time, median first byte, TTS real-time
+factor, render real-time factor, neural FPS, generated media duration, gaps and
+client wall time. TTS RTF is the primary speed comparison because different
+voice modes can speak the same text at different speeds. Voice identity,
+naturalness and lip-sync quality remain listening/viewing checks; performance
+metrics cannot replace them.
+
+The top-level comparison files include every discovered scenario and record
+hashes for both the benchmark text and preset WAV. Only treat rows with matching
+hashes as a controlled speed comparison.
+
+To run the v2E.1 handshake regression tests in the built image:
+
+```bash
+docker compose run --rm --no-deps --entrypoint python benchmark-fixture \
+  /workspace/FasterLivePortrait/test_benchmark_handshake.py -v
 ```
 
 ## Configure an optional preset voice
@@ -166,8 +270,8 @@ Changing only these input files does not require an image rebuild.
 
 ## Rebuild after this update
 
-`server.py` and `index.html` are copied into the avatar image, so rebuild that
-target:
+`server.py`, `index.html` and the benchmark client are copied into the avatar
+image, so rebuild that target:
 
 ```bash
 docker compose build --no-cache webrtc-avatar
@@ -191,9 +295,13 @@ Changes are intentionally introduced and measured one step at a time:
 4. **v2C-B, rejected:** overlap one future TTS request with the current
    portrait render. On the shared RTX 5080 it approximately halved neural FPS,
    so v2D defaults prefetch off.
-5. **v2D, this archive:** compare designed voice CFG 4, preset clone CFG 1 and
+5. **v2D, complete:** compare designed voice CFG 4, preset clone CFG 1 and
    preset direction CFG 4 while recording the selected mode per phrase.
-6. **Later experiments:** add phrase-boundary motion blending, then test a
+6. **v2E, complete:** automate canonical preset creation and repeatable
+   headless WebRTC comparisons with saved machine-readable reports.
+7. **v2E.1, this archive:** make the initial benchmark data-channel handshake
+   reliable across aiortc channel-open event ordering.
+8. **Later experiments:** add phrase-boundary motion blending, then test a
    Blackwell-compatible TensorRT path and Ditto
    online in separate containers.
 
@@ -603,11 +711,31 @@ shape warnings were unchanged.
 The gaps match `current TTS + current render − previous media` within normal
 packet timing. This is the control run for the v2D voice-mode comparison.
 
+## Recorded initial v2D voice-mode result
+
+The first manual comparison confirmed both modes worked and rendering remained
+stable near 11.5 FPS. The texts differed slightly, so total milliseconds were
+not accepted as a controlled comparison, but two important behaviors were
+clear:
+
+- Designed voice first byte stayed between 190 and 211 ms.
+- The first-ever preset clone request took 6,782 ms to its first byte, while
+  later preset phrases returned their first bytes in 227–261 ms. This indicates
+  approximately 6.5 seconds of one-time reference/audio-tokenizer cold work.
+- Warm preset TTS ran at roughly 0.94× generated media duration, compared with
+  roughly 0.96× for design. CFG 1 did not create a large steady-state penalty.
+- Preset speech was substantially longer for comparable phrases: `Hello!` was
+  1.84 seconds instead of 0.64 seconds. That increased JoyVASA frames, portrait
+  renders and gaps even though per-media-second efficiency was similar.
+
+This result motivated v2E: warm every mode separately, require identical test
+text, calculate TTS/render RTF, and retain raw output automatically.
+
 ## v2D voice comparison procedure
 
 1. Keep `TTS_PREFETCH=false`, `RENDER_STRIDE=2` and all phrase thresholds
    unchanged.
-2. Confirm `/health` reports build `neural-avatar-v2d-voice-modes` and
+2. Confirm `/health` reports build `neural-avatar-v2e1-benchmark-handshake-fix` and
    `preset_voice_configured: true` after adding the preset files.
 3. Use the same text for Designed voice, Preset voice (clone), and Preset voice
    + direction. Run each mode three times without restarting services.
@@ -718,6 +846,39 @@ packet timing. This is the control run for the v2D voice-mode comparison.
 - **Rollback:** select Designed voice in the UI or set
   `BREEZE_DEFAULT_VOICE_MODE=design`; the v2C-A serial render path is unchanged.
 
+### v2E — repeatable headless WebRTC benchmark
+
+- **Observed problem:** manually entered test sentences differed between voice
+  modes, the first preset request included a one-time cold penalty, and total
+  TTS time was misleading when cloned speech duration changed.
+- **Decision:** generate a deterministic Breeze reference fixture and drive the
+  same `/offer`, media-track and data-channel path as the browser.
+- **Measurement:** warm each mode explicitly, rotate measured modes per repeat,
+  calculate TTS/render RTF and weighted neural FPS, and store JSON, CSV and
+  Markdown artifacts with the complete `/health` configuration.
+- **Scenario control:** Compose exposes stride, prefetch and phrase thresholds
+  through namespaced host variables; the default matrix retains stride two and
+  prefetch false.
+- **Safety:** existing preset files are never overwritten unless
+  `REGENERATE_PRESET=1` is explicitly supplied. Incomplete preset pairs fail
+  instead of guessing.
+- **Intentionally deferred:** automated perceptual speaker similarity, visual
+  lip-sync scoring, reference-token caching and incremental neural streaming.
+
+### v2E.1 — benchmark readiness handshake
+
+- **Observed problem:** WebRTC and the local data channel connected, but the
+  benchmark timed out waiting 30 seconds for the server's initial `ready`
+  message.
+- **Cause:** for a remotely created aiortc data channel, the server can receive
+  the channel after it is already open. Attaching only an `open` handler at that
+  point misses the transition.
+- **Fix:** the server checks the current channel state as well as listening for
+  `open`, with a guard preventing duplicate `ready` messages. The benchmark
+  also accepts its own open channel after a two-second compatibility wait.
+- **Scope:** this changes only connection setup; benchmark text, warm-ups,
+  metrics, voice modes and renderer settings remain identical to v2E.
+
 ## WebRTC behavior
 
 The connection remains open between requests. The server sends:
@@ -756,6 +917,13 @@ Only use checkpoints from trusted publishers. This project does not disable
 PyTorch's restricted checkpoint loading globally.
 
 ## Troubleshooting
+
+### Benchmark times out in `AvatarBenchmarkClient.connect`
+
+Confirm `/health` reports
+`server_build: neural-avatar-v2e1-benchmark-handshake-fix`. If it reports v2E,
+the old image is still running. Rebuild and force-recreate the avatar. v2E.1
+does not require a server `ready` event once the client data channel is open.
 
 ### No progressive fields in `/health`
 
@@ -893,7 +1061,7 @@ docker compose down
 
 ## Next architectural step: Ditto online
 
-After the v2D voice comparison, the remaining FasterLivePortrait experiment is
+After the v2E benchmark baseline, the remaining FasterLivePortrait experiment is
 phrase-boundary blending followed by incremental frame append so playback can
 begin before a complete phrase is rendered. That requires a thread-safe bounded
 frame queue and careful audio start timing; it should remain separate from the

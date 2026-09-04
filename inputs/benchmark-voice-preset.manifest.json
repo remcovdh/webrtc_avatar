@@ -1,0 +1,17 @@
+{
+  "cfg_scale": 4.0,
+  "created_utc": "2026-09-04T06:11:32.685253+00:00",
+  "duration_seconds": 4.4,
+  "first_byte_ms": 1925,
+  "generator": "Breeze TTS 2 streaming API",
+  "instruction": "A warm, clear, natural voice with a natural, slightly brisk conversational pace and no long pauses.",
+  "sample_rate": 24000,
+  "seed": 42,
+  "text": "Hello, I am your friendly virtual assistant, ready to help with a clear and natural conversational voice.",
+  "total_ms": 5983,
+  "transcript_path": "/workspace/inputs/benchmark-voice-preset.txt",
+  "transcript_sha256": "28995e4f08d41dd2e70db377148ba4e38c0cd6dcb11098f8117a0203890efcb8",
+  "tts_url": "http://127.0.0.1:7860",
+  "wav_path": "/workspace/inputs/benchmark-voice-preset.wav",
+  "wav_sha256": "5dc57c858b048c37ff41919f2b7facb41e55c1ea5693918bcae9d05d9fc19b89"
+}
