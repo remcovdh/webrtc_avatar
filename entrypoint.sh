@@ -52,8 +52,14 @@ case "${mode}" in
     ;;
   tts)
     cd /workspace/breeze-tts
+    breeze_fast_args=()
+    if [[ -n "${BREEZE_FAST_ARGS:-}" ]]; then
+      read -r -a breeze_fast_args <<< "${BREEZE_FAST_ARGS}"
+    fi
+    echo "[breeze] Fast-path arguments: ${BREEZE_FAST_ARGS:-<eager baseline>}"
     exec python -m breeze_infer.api "${breeze_model}" \
-      --host 0.0.0.0 --port "${BREEZE_PORT:-7860}"
+      --host 0.0.0.0 --port "${BREEZE_PORT:-7860}" \
+      "${breeze_fast_args[@]}"
     ;;
   *)
     exec "$@"

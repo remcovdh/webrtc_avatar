@@ -1,4 +1,20 @@
-# neural-avatar-v2f-adaptive-stride
+# neural-avatar-v2g1-benchmark-argument-fix
+
+## v2G.1 correction
+
+- Passes `--fast-args=<value>` so values such as
+  `--fast-backbone-decode` cannot be parsed as benchmark options.
+- No Breeze, avatar, rendering, or benchmark-policy behavior changed.
+
+## v2G optimization
+
+- Preserves the proven v2F adaptive stride behavior.
+- Adds `breeze_benchmark.sh` and `breeze_benchmark.py`.
+- Tests Breeze eager and each official fast stage with fixed inputs.
+- Captures warmed first byte, RTF, total time, and sampled GPU memory.
+- Continues after unsupported/OOM profiles and retains their logs.
+- Adds an opt-in `fast-all` test and documents the two-laptop topology.
+- Makes `BREEZE_TTS_URL` configurable for a remote Breeze server.
 
 ## v2F optimization
 

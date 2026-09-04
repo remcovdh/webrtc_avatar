@@ -22,11 +22,18 @@ services:
       context: .
       dockerfile: Dockerfile
       target: breeze
+      args:
+        BREEZE_INSTALL_FLASH_ATTN: "${BREEZE_INSTALL_FLASH_ATTN:-0}"
+        FLASH_ATTN_CUDA_ARCHS: "${FLASH_ATTN_CUDA_ARCHS:-120}"
     image: neural-avatar-breeze:latest
     command: ["tts"]
     network_mode: host
     gpus: all
     shm_size: 4gb
+    environment:
+      # Set only through breeze-benchmark.sh unless intentionally testing a
+      # known configuration. Empty means Breeze's eager baseline.
+      BREEZE_FAST_ARGS: "${BREEZE_FAST_ARGS:-}"
     volumes:
       - ./models:/workspace/models:ro
     depends_on:
@@ -50,7 +57,9 @@ services:
     ipc: host
     shm_size: 8gb
     environment:
-      BREEZE_TTS_URL: http://127.0.0.1:7860
+      # May point at the older RTX 4080 laptop, for example
+      # http://192.168.178.50:7860. See README.md before using remote mode.
+      BREEZE_TTS_URL: "${BREEZE_TTS_URL:-http://127.0.0.1:7860}"
       AVATAR_PATH: /workspace/inputs/avatar.jpg
       FLP_CONFIG_PATH: /workspace/FasterLivePortrait/configs/onnx_infer.yaml
       # The crop contains the animated face and avoids the per-frame cuSOLVER

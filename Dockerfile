@@ -22,6 +22,8 @@ RUN python -m pip install --upgrade pip setuptools wheel packaging ninja
 FROM common AS breeze
 
 ARG BREEZE_REF=main
+ARG BREEZE_INSTALL_FLASH_ATTN=0
+ARG FLASH_ATTN_CUDA_ARCHS=120
 WORKDIR /workspace
 
 RUN mkdir -p /workspace/breeze-tts \
@@ -29,11 +31,17 @@ RUN mkdir -p /workspace/breeze-tts \
       "https://github.com/breezeblue-ai/breeze-tts/archive/refs/heads/${BREEZE_REF}.tar.gz" \
       | tar -xz --strip-components=1 -C /workspace/breeze-tts
 WORKDIR /workspace/breeze-tts
-# Do not install FlashAttention 2 on RTX 50-series / Blackwell. Breeze's eager
-# runtime works without it and PyTorch 2.9.1 + CUDA 12.8 supports sm_120.
+# Breeze's eager runtime works without FlashAttention and PyTorch 2.9.1 with
+# CUDA 12.8 supports sm_120. Keep FlashAttention experimental below.
 RUN python -m pip install -r requirements.txt
+# Experimental on RTX 50-series/Blackwell: upstream FlashAttention 2 does not
+# currently list Blackwell as supported. Keep this opt-in.
+RUN if [ "${BREEZE_INSTALL_FLASH_ATTN}" = "1" ]; then \
+      MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS}" \
+        python -m pip install --no-build-isolation --no-deps "flash-attn==2.8.3"; \
+    fi
 
-COPY entrypoint.sh /workspace/entrypoint.sh
+COPY entrypoint.sh breeze_benchmark.py /workspace/
 RUN chmod +x /workspace/entrypoint.sh
 ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["tts"]

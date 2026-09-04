@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "scenario": "eager",
+  "fast_args": "",
+  "text": "Hello! This is a repeatable Breeze streaming benchmark. It measures the time to first audio and the total generation speed.",
+  "instruction": "A warm, clear, natural voice with a calm conversational delivery.",
+  "cfg_scale": 4.0,
+  "seed": 42,
+  "flash_attention": null,
+  "warmups": 1,
+  "repeats": 1,
+  "runs": [
+    {
+      "headers_ms": 3.08,
+      "first_byte_ms": 191.419,
+      "total_ms": 8285.91,
+      "bytes": 403200,
+      "media_seconds": 8.4,
+      "rtf": 0.986418,
+      "gpu_peak_mib": 8526,
+      "gpu_min_mib": 8526,
+      "run": 1
+    }
+  ],
+  "median": {
+    "headers_ms": 3.08,
+    "first_byte_ms": 191.419,
+    "total_ms": 8285.91,
+    "media_seconds": 8.4,
+    "rtf": 0.986,
+    "gpu_peak_mib": 8526,
+    "gpu_min_mib": 8526
+  }
+}

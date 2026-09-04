@@ -1,8 +1,124 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2f-adaptive-stride`
+Current build: `neural-avatar-v2g1-benchmark-argument-fix`
 
-This archive is v2F of the latency optimization series. It retains the v2E.1
+> v2G.1 fixes fast-profile names beginning with `--` being misread by the
+> benchmark client's argument parser. The Breeze CUDA graph was already being
+> captured correctly; only the measurement command failed.
+
+## Breeze fast-path benchmark (v2G)
+
+This version preserves v2F's adaptive renderer and adds a controlled,
+Breeze-only benchmark. It restarts Breeze for every configuration, performs
+warm-up requests, and measures identical voice-design requests. It records
+first-byte latency, total synthesis time, audio duration, RTF, and sampled GPU
+memory. Unsupported or out-of-memory profiles are recorded without stopping
+the rest of the matrix.
+
+Build once and run the safe individual-stage matrix:
+
+```bash
+docker compose build breeze-tts
+./breeze_benchmark.sh
+```
+
+Results appear in `results/breeze-benchmarks/<UTC timestamp>/` as `report.md`,
+`comparison.csv`, and one JSON document per successful profile.
+The script stops `webrtc-avatar` to free VRAM and isolate the measurement. Run
+`docker compose up -d` afterward to restore the full application.
+
+| Profile | Breeze argument | Primary measurement |
+| --- | --- | --- |
+| `eager` | none | Working control |
+| `backbone-decode` | `--fast-backbone-decode` | Autoregressive throughput |
+| `depth-decoder` | `--fast-depth-decoder` | Depth-loop throughput |
+| `codec` | `--fast-codec` | Streaming PCM decoding |
+| `backbone-prefill` | `--fast-backbone-prefill` | Prompt startup |
+| `text-encoder` | `--fast-text-encoder` | Text-encoding startup |
+
+Quick smoke test:
+
+```bash
+BREEZE_BENCHMARK_WARMUPS=1 BREEZE_BENCHMARK_REPEATS=1 \
+BREEZE_BENCHMARK_PROFILES="eager backbone-decode" \
+  ./breeze_benchmark.sh
+```
+
+Recommended five-repeat comparison:
+
+```bash
+BREEZE_BENCHMARK_WARMUPS=2 BREEZE_BENCHMARK_REPEATS=5 \
+BREEZE_BENCHMARK_PROFILES="eager backbone-decode depth-decoder codec" \
+  ./breeze_benchmark.sh
+```
+
+After individual results identify safe winners:
+
+```bash
+BREEZE_BENCHMARK_PROFILES="eager decode-depth-codec" \
+  ./breeze_benchmark.sh
+```
+
+`--fast-all` is excluded by default because Breeze documents substantially
+higher memory use and the 16 GB GPU must also accommodate FasterLivePortrait.
+Run it only as an isolated, recoverable experiment:
+
+```bash
+BREEZE_BENCHMARK_PROFILES="eager" \
+BREEZE_BENCHMARK_INCLUDE_FAST_ALL=1 \
+  ./breeze_benchmark.sh
+```
+
+FlashAttention 2.8.3 is an experimental separate build on the RTX 5080 because
+upstream does not currently list Blackwell under FlashAttention 2 support. Test
+the normal image first. Then, if desired, attempt an `sm_120` build:
+
+```bash
+BREEZE_INSTALL_FLASH_ATTN=1 FLASH_ATTN_CUDA_ARCHS=120 \
+  docker compose build breeze-tts
+BREEZE_BENCHMARK_PROFILES="eager backbone-decode" \
+  ./breeze_benchmark.sh
+```
+
+If compilation fails, rebuild with `BREEZE_INSTALL_FLASH_ATTN=0`. Every result
+records whether FlashAttention actually imported, preventing accidental mixed
+comparisons.
+
+First byte measures startup responsiveness; RTF measures completion speed. RTF
+below 1 means synthesis finishes faster than the generated audio plays. Compare
+both speed and peak GPU memory. `Loading weights: 211/211` is service startup,
+not work repeated for every phrase.
+
+## Optional RTX 4080 + RTX 5080 split
+
+The older RTX 4080 can run Breeze while the RTX 5080 runs FastAPI/WebRTC,
+JoyVASA, and FasterLivePortrait. This removes GPU scheduling and VRAM
+competition. Raw 24 kHz mono PCM is only 48,000 bytes/s, so bandwidth is tiny;
+LAN latency and phrase buffering matter more.
+
+| Laptop | Workload |
+| --- | --- |
+| RTX 4080 | Breeze API and Breeze model |
+| RTX 5080 | WebRTC, JoyVASA motion, portrait rendering |
+
+Expose port 7860 only on the trusted LAN. Then set the remote server on the
+5080 system (replace the example address):
+
+```bash
+BREEZE_TTS_URL=http://192.168.178.50:7860 \
+  docker compose up -d --no-deps webrtc-avatar
+```
+
+`--no-deps` prevents Compose from starting local Breeze. Model initialization
+must already have completed on the 5080. First benchmark single-GPU and split
+layouts separately; do not mix a topology change into a fast-stage A/B test.
+
+The split does not automatically make JoyVASA continuous. The current server
+still collects a full phrase before making motion. The later streaming-renderer
+step should accept short overlapping PCM windows, preserve motion state between
+windows, and enqueue frames as soon as the first window is ready.
+
+This archive is v2G of the latency optimization series. It retains the v2F
 benchmark and adds an adaptive stride 2→3 render policy based on measured
 playback-buffer pressure. One command can generate
 a deterministic Breeze reference fixture, exercise the same WebRTC/API path as
@@ -46,6 +162,8 @@ underrun in the UI.
 ├── Dockerfile
 ├── benchmark.sh
 ├── benchmark_avatar.py
+├── breeze_benchmark.sh
+├── breeze_benchmark.py
 ├── test_benchmark_handshake.py
 ├── docker-compose.yml
 ├── entrypoint.sh
