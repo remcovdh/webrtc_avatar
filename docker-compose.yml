@@ -33,7 +33,9 @@ services:
     environment:
       # Set only through breeze-benchmark.sh unless intentionally testing a
       # known configuration. Empty means Breeze's eager baseline.
-      BREEZE_FAST_ARGS: "${BREEZE_FAST_ARGS:-}"
+      # v2I default selected by the five-repeat v2H benchmark. Override with
+      # an empty value for eager or another tested combination for rollback.
+      BREEZE_FAST_ARGS: "${BREEZE_FAST_ARGS:---fast-depth-decoder --fast-codec --fast-backbone-decode}"
     volumes:
       - ./models:/workspace/models:ro
     depends_on:
@@ -79,6 +81,12 @@ services:
       # v2C-B testing showed that concurrent TTS approximately halved portrait
       # FPS on the shared laptop GPU. Keep serial scheduling for v2E.
       TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-false}"
+      # Keep FasterLivePortrait's initial driving reference for every phrase
+      # in one utterance. Set false for immediate v2H phrase-reset behavior.
+      PERSISTENT_PHRASE_MOTION: "${AVATAR_PERSISTENT_PHRASE_MOTION:-true}"
+      # Required for FasterLivePortrait to apply its stored first-frame motion
+      # reference. Set false together with persistence for v2H behavior.
+      AVATAR_RELATIVE_MOTION: "${AVATAR_RELATIVE_MOTION:-true}"
       # Voice modes exposed in the browser:
       #   design           = reference-free voice design with CFG 4
       #   preset-clone     = fixed reference identity with CFG 1

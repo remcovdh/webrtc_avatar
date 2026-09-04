@@ -1,6 +1,40 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2h-breeze-combinations-audio`
+Current build: `neural-avatar-v2i-persistent-motion`
+
+## v2I persistent phrase motion
+
+The prepared-avatar preview is intentionally deferred. v2I changes the runtime
+behavior that affects progressive playback now:
+
+- Breeze starts with the measured winning fast path:
+  `--fast-depth-decoder --fast-codec --fast-backbone-decode`.
+- Relative motion is enabled so driving motion is mapped onto the source pose.
+- Phrase 1 establishes FasterLivePortrait's driving reference.
+- Later phrases in the same user utterance reuse that reference instead of
+  resetting their coordinate system.
+- Every new user utterance resets once, preventing state leakage between
+  separate Generate and Speak actions.
+
+Both changes are reversible without rebuilding:
+
+```bash
+# Restore v2H motion behavior and eager Breeze.
+BREEZE_FAST_ARGS="" \
+AVATAR_RELATIVE_MOTION=false \
+AVATAR_PERSISTENT_PHRASE_MOTION=false \
+  docker compose up -d --force-recreate breeze-tts webrtc-avatar
+```
+
+The health endpoint reports `relative_motion` and
+`persistent_phrase_motion`. Per-phrase metrics report
+`render_motion_reference_reset`; it should be `true` only for phrase 1 and
+`false` for subsequent phrases.
+
+Test continuity with at least three short sentences and watch the transition
+between them. This step preserves one motion reference; it does not yet blend
+the final frames of one phrase into the first frames of the next. Boundary
+crossfading belongs to the later incremental-window renderer.
 
 ## v2H combination and listening test
 

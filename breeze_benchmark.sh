@@ -63,7 +63,7 @@ for profile in ${profiles}; do
     continue
   fi
 
-  if ! docker compose exec -T breeze-tts python3 /workspace/breeze_benchmark.py \
+  if ! docker compose exec -T breeze-tts python /workspace/breeze_benchmark.py \
       --scenario "${profile}" \
       --fast-args="${flags[${profile}]}" \
       --warmups "${warmups}" \
@@ -79,7 +79,7 @@ for profile in ${profiles}; do
   docker compose cp "breeze-tts:/workspace/results/${profile}.wav" "${output_root}/audio/${profile}.wav"
 done
 
-python3 - "${output_root}" <<'PY'
+python - "${output_root}" <<'PY'
 import csv, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 rows=[]

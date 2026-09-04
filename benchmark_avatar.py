@@ -542,6 +542,12 @@ def _markdown_report(payload: dict[str, Any]) -> str:
             buffer=float(payload["health"].get("catchup_buffer_seconds", 0)),
         ),
         "",
+        "Motion policy: relative `{relative}`, persistent across phrases "
+        "`{persistent}`".format(
+            relative=payload["health"].get("relative_motion", False),
+            persistent=payload["health"].get("persistent_phrase_motion", False),
+        ),
+        "",
         "## Median results",
         "",
         "| Mode | First ready | First byte | TTS RTF | Render RTF | Neural FPS | Media | Gap | Client wall |",

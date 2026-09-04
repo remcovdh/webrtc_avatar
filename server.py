@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2f-adaptive-stride"
+SERVER_BUILD = "neural-avatar-v2i-persistent-motion"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -125,6 +125,8 @@ TTS_STARTUP_POLL_SECONDS = max(
 )
 PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
 TTS_PREFETCH = _env_bool("TTS_PREFETCH", False)
+PERSISTENT_PHRASE_MOTION = _env_bool("PERSISTENT_PHRASE_MOTION", True)
+AVATAR_RELATIVE_MOTION = _env_bool("AVATAR_RELATIVE_MOTION", True)
 PHRASE_FIRST_TARGET_CHARS = max(
     8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
 )
@@ -293,7 +295,9 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     # fail even though motion generation succeeded. The crop output already
     # contains the complete animated face and is the better WebRTC default.
     cfg.infer_params.flag_pasteback = AVATAR_PASTE_BACK
-    cfg.infer_params.flag_relative_motion = False
+    # Relative motion maps driving deltas onto the source pose. Persistence
+    # below then keeps one reference across all phrases in an utterance.
+    cfg.infer_params.flag_relative_motion = AVATAR_RELATIVE_MOTION
     cfg.infer_params.flag_stitching = True
     cfg.infer_params.animation_region = "all"
     cfg.infer_params.cfg_scale = float(os.getenv("JOYVASA_CFG_SCALE", "2.8"))
@@ -619,6 +623,7 @@ def _ensure_joyvasa_pipeline() -> None:
 def _render_animation_direct(
     wav_path: Path,
     render_stride: int | None = None,
+    reset_motion_reference: bool = True,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
 
@@ -663,7 +668,10 @@ def _render_animation_direct(
             [motion, eyes, lips],
             pipeline.src_imgs[0],
             pipeline.src_infos[0],
-            first_frame=frame_index == 0,
+            # FasterLivePortrait stores the initial driving rotation and motion
+            # reference on first_frame. Reset once per user utterance, not once
+            # per phrase, so later chunks remain in the same motion space.
+            first_frame=reset_motion_reference and frame_index == 0,
         )
         out_crop = output[0]
         if out_crop is None:
@@ -692,6 +700,9 @@ def _render_animation_direct(
             len(frames) / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
             3,
         ),
+        "motion_reference_reset": reset_motion_reference,
+        "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
+        "relative_motion": AVATAR_RELATIVE_MOTION,
     }
 
 
@@ -699,9 +710,14 @@ def _render_animation(
     wav_path: Path,
     output_dir: Path,
     render_stride: int | None = None,
+    reset_motion_reference: bool = True,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK:
-        return _render_animation_direct(wav_path, render_stride)
+        return _render_animation_direct(
+            wav_path,
+            render_stride,
+            reset_motion_reference,
+        )
     return _render_animation_legacy(wav_path, output_dir)
 
 
@@ -877,6 +893,7 @@ async def _create_clip(
                         wav_path,
                         chunk_dir,
                         selected_stride,
+                        index == 1 or not PERSISTENT_PHRASE_MOTION,
                     )
                     render_detail["adaptive_stride"] = ADAPTIVE_RENDER_STRIDE
                     render_detail["stride_reason"] = stride_reason
@@ -904,6 +921,7 @@ async def _create_clip(
                         "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
                         "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
                         "buffer_before=%.3fs motion=%dms "
+                        "motion_reference_reset=%s persistent_motion=%s "
                         "frame_loop=%dms effective_fps=%.2f pipeline=%dms "
                         "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
                         "buffer=%.3fs underrun=%.0fms",
@@ -924,6 +942,8 @@ async def _create_clip(
                         render_detail["stride_reason"],
                         render_detail["buffer_before_render_seconds"],
                         render_detail["motion_ms"],
+                        render_detail.get("motion_reference_reset", True),
+                        render_detail.get("persistent_phrase_motion", False),
                         render_detail["frame_loop_ms"],
                         render_detail["effective_fps"],
                         render_detail["pipeline_ms"],
@@ -962,6 +982,12 @@ async def _create_clip(
                             "buffer_before_render_seconds"
                         ],
                         render_motion_ms=render_detail["motion_ms"],
+                        render_motion_reference_reset=render_detail.get(
+                            "motion_reference_reset", True
+                        ),
+                        render_persistent_phrase_motion=render_detail.get(
+                            "persistent_phrase_motion", False
+                        ),
                         render_frame_loop_ms=render_detail["frame_loop_ms"],
                         render_effective_fps=render_detail["effective_fps"],
                         render_pipeline_ms=render_detail["pipeline_ms"],
@@ -1220,6 +1246,8 @@ async def health() -> JSONResponse:
         "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
         "tts_prefetch": TTS_PREFETCH,
         "tts_prefetch_depth": 1 if TTS_PREFETCH else 0,
+        "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
+        "relative_motion": AVATAR_RELATIVE_MOTION,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
         "voice_modes": sorted(VOICE_MODES),
         "preset_voice_configured": preset_configured,

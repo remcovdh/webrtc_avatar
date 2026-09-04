@@ -1,4 +1,15 @@
-# neural-avatar-v2h-breeze-combinations-audio
+# neural-avatar-v2i-persistent-motion
+
+## v2I optimization
+
+- Defers prepared-avatar preview work as requested.
+- Makes the v2H-winning Breeze combination the Compose default.
+- Enables configurable relative motion.
+- Resets FasterLivePortrait's driving reference only on phrase 1 of an
+  utterance, preserving it for later progressive phrases.
+- Resets again for each new user action.
+- Exposes motion policy in health, phrase metrics, logs, and benchmark reports.
+- Adds a build-time regression test for continuity wiring.
 
 ## v2H optimization
 
