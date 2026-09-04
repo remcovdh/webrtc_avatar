@@ -108,6 +108,12 @@ services:
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"
       WARMUP_TEXT: "Hello."
+      # Show an already-rendered, aligned warm-up frame while idle. The source
+      # photo remains hidden, avoiding the large pose/crop jump at first speech.
+      USE_NEURAL_IDLE_FRAME: "${AVATAR_USE_NEURAL_IDLE_FRAME:-true}"
+      # Frame zero normally has the neutral initial JoyVASA pose. This can be
+      # changed for diagnosis without rebuilding the image.
+      WARMUP_IDLE_FRAME_INDEX: "${AVATAR_WARMUP_IDLE_FRAME_INDEX:-0}"
       # Protect manual or partial Compose starts: wait for Breeze instead of
       # failing warm-up immediately when port 7860 is not ready yet.
       TTS_STARTUP_WAIT_SECONDS: "300"

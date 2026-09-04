@@ -1,6 +1,40 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2i-persistent-motion`
+Current build: `neural-avatar-v2j-neural-idle-frame`
+
+## v2J neural idle frame
+
+v2J removes the large visual jump before the first spoken phrase. The hidden
+startup warm-up now keeps its first neural output frame and uses it as the
+WebRTC idle image. Consequently, the browser never presents the original
+photograph: `avatar.jpg` remains the source input, while both idle and speaking
+frames use FasterLivePortrait's aligned crop and neural render space.
+
+The same prepared frame is shown when a client first connects and after its
+playback queue drains. It does not add work to a request because it reuses the
+startup warm-up that already ran before the service became ready.
+
+Relevant settings:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `AVATAR_USE_NEURAL_IDLE_FRAME` | `true` | Use a startup warm-up frame as the visible idle image. Set `false` to restore the original photograph. |
+| `AVATAR_WARMUP_IDLE_FRAME_INDEX` | `0` | Select the rendered warm-up frame. Frame zero is normally the neutral initial pose. |
+| `WARMUP_TEXT` | `Hello.` | Hidden warm-up speech; unchanged from v2I. |
+
+Verify after recreation:
+
+```bash
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+```
+
+Expected values include `server_build: neural-avatar-v2j-neural-idle-frame`,
+`neural_idle_frame_enabled: true`, and
+`idle_frame_source: startup-warmup-neural-frame`. The log also reports
+`Neural idle frame prepared from warm-up frame 0/...`.
+
+This change fixes the initial appearance discontinuity; it does not yet make
+phrase rendering incremental. Persistent phrase motion from v2I remains active.
 
 ## v2I persistent phrase motion
 

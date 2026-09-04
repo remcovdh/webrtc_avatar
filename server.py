@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2i-persistent-motion"
+SERVER_BUILD = "neural-avatar-v2j-neural-idle-frame"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -117,6 +117,8 @@ CATCHUP_BUFFER_SECONDS = max(
 )
 STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
 WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
+USE_NEURAL_IDLE_FRAME = _env_bool("USE_NEURAL_IDLE_FRAME", True)
+WARMUP_IDLE_FRAME_INDEX = int(os.getenv("WARMUP_IDLE_FRAME_INDEX", "0"))
 TTS_STARTUP_WAIT_SECONDS = max(
     0.0, float(os.getenv("TTS_STARTUP_WAIT_SECONDS", "300"))
 )
@@ -147,6 +149,8 @@ warmup_seconds: float | None = None
 warmup_metrics: dict[str, Any] = {}
 warmup_error: str | None = None
 tts_startup_wait_seconds: float | None = None
+idle_frame_source = "original-avatar"
+idle_frame_index: int | None = None
 
 VOICE_MODE_DESIGN = "design"
 VOICE_MODE_PRESET_CLONE = "preset-clone"
@@ -1095,6 +1099,7 @@ async def _warmup_pipeline() -> None:
     """Exercise the same TTS, JoyVASA and renderer path before the first user."""
     global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
     global tts_startup_wait_seconds
+    global BASE_AVATAR, idle_frame_source, idle_frame_index
 
     started = time.perf_counter()
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1131,6 +1136,26 @@ async def _warmup_pipeline() -> None:
                 wav_path,
                 warmup_dir,
             )
+            if USE_NEURAL_IDLE_FRAME:
+                if not frames:
+                    raise RuntimeError(
+                        "Startup warm-up returned no frame for the neural idle image"
+                    )
+                selected_index = min(
+                    max(WARMUP_IDLE_FRAME_INDEX, 0),
+                    len(frames) - 1,
+                )
+                # WebRTC must start in the same aligned, neural render space as
+                # speech. The source photograph stays hidden and is used only
+                # to initialise FasterLivePortrait.
+                BASE_AVATAR = frames[selected_index].copy()
+                idle_frame_source = "startup-warmup-neural-frame"
+                idle_frame_index = selected_index
+                LOG.info(
+                    "Neural idle frame prepared from warm-up frame %d/%d",
+                    selected_index,
+                    len(frames),
+                )
             warmup_seconds = time.perf_counter() - started
             warmup_metrics = {
                 "tts_startup_wait_ms": round(tts_startup_wait_seconds * 1000),
@@ -1138,6 +1163,8 @@ async def _warmup_pipeline() -> None:
                 "voice_mode": warmup_voice.mode,
                 "voice_cfg_scale": warmup_voice.cfg_scale,
                 "render": render_detail,
+                "idle_frame_source": idle_frame_source,
+                "idle_frame_index": idle_frame_index,
                 "media_seconds": round(
                     max(len(pcm) / 24_000, len(frames) / max(fps, 1.0)),
                     3,
@@ -1236,6 +1263,9 @@ async def health() -> JSONResponse:
         ),
         "startup_warmup_metrics": warmup_metrics,
         "startup_warmup_error": warmup_error,
+        "neural_idle_frame_enabled": USE_NEURAL_IDLE_FRAME,
+        "idle_frame_source": idle_frame_source,
+        "idle_frame_index": idle_frame_index,
         "tts_startup_wait_limit_seconds": TTS_STARTUP_WAIT_SECONDS,
         "tts_startup_poll_seconds": TTS_STARTUP_POLL_SECONDS,
         "tts_startup_wait_seconds": (
