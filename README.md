@@ -1,12 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2c-b-tts-prefetch`
+Current build: `neural-avatar-v2d-voice-modes`
 
-This archive is v2C-B of the latency optimization series. It retains the proven
-stride-two direct renderer and overlaps at most one future Breeze phrase with
-the current FasterLivePortrait render. This bounded depth-one prefetch targets
-the strictly serial TTS→render pauses measured in v2C-A. Set `TTS_PREFETCH=false`
-for exact v2C-A scheduling.
+This archive is v2D of the latency optimization series. It retains the proven
+stride-two direct renderer, disables harmful shared-GPU TTS prefetch, and adds
+three selectable Breeze voice modes: reference-free design, preset clone, and
+preset direction. A preset may be an owned/licensed recording or one good
+Breeze-designed sentence generated once and then reused with its exact
+transcript.
 
 This project is a working test of a browser-delivered talking avatar:
 
@@ -31,8 +32,7 @@ text -> phrase 1: TTS -> render -> playback starts
 This substantially improves time-to-first-speech for multi-sentence input. It
 is not yet frame-by-frame neural streaming: Breeze, JoyVASA and
 FasterLivePortrait still complete each phrase before that phrase is appended to
-playback. v2C-B also starts TTS for the next phrase while rendering the current
-one. Each phrase still waits for its selected frames before being appended;
+playback. Each phrase still waits for its selected frames before being appended;
 incremental frame delivery is a later, separately measured change. If a later
 phrase takes longer to generate than the media already buffered, the client
 receives silence and holds the last video frame. That gap is measured as an
@@ -49,7 +49,9 @@ underrun in the UI.
 ├── patch_warping_onnx.py
 ├── server.py
 ├── inputs/
-│   └── avatar.jpg
+│   ├── avatar.jpg
+│   ├── voice-preset.wav  # optional
+│   └── voice-preset.txt  # optional exact transcript
 ├── checkpoints/
 ├── models/
 └── results/
@@ -93,12 +95,18 @@ Expected progressive fields:
 
 ```json
 {
-  "server_build": "neural-avatar-v2c-b-tts-prefetch",
+  "server_build": "neural-avatar-v2d-voice-modes",
   "render_backend": "direct-memory",
   "direct_memory_render": true,
   "render_stride": 2,
-  "tts_prefetch": true,
-  "tts_prefetch_depth": 1,
+  "tts_prefetch": false,
+  "tts_prefetch_depth": 0,
+  "default_voice_mode": "design",
+  "voice_modes": ["design", "preset-clone", "preset-direction"],
+  "preset_voice_configured": false,
+  "design_cfg_scale": 4.0,
+  "preset_clone_cfg_scale": 1.0,
+  "preset_direction_cfg_scale": 4.0,
   "startup_warmup_enabled": true,
   "startup_warmup_complete": true,
   "progressive_phrase_mode": true,
@@ -107,6 +115,54 @@ Expected progressive fields:
   "phrase_max_chars": 160
 }
 ```
+
+## Configure an optional preset voice
+
+Preset modes are deliberately unavailable until both files exist:
+
+```text
+inputs/voice-preset.wav
+inputs/voice-preset.txt
+```
+
+`voice-preset.txt` must contain the exact words spoken in the WAV, including
+filled pauses or vocal-event text where applicable. Use a clean single-speaker
+recording that you own or are authorized to clone.
+
+To use an existing recording:
+
+```bash
+cp /path/to/authorized-reference.wav inputs/voice-preset.wav
+printf '%s\n' 'The exact words spoken in the reference recording.' > inputs/voice-preset.txt
+docker compose up -d --force-recreate webrtc-avatar
+```
+
+To create a synthetic preset, first ask Breeze to design one good reference
+sentence and save that result once. The response is raw mono 24 kHz signed
+16-bit PCM:
+
+```bash
+curl --fail --silent --show-error \
+  -X POST http://127.0.0.1:7860/v1/audio/speech \
+  -F 'text=Hello, I am your friendly virtual assistant, ready to help.' \
+  -F 'instruction=A warm, clear, natural voice with a calm conversational delivery.' \
+  -F 'cfg_scale=4' \
+  -F 'seed=42' \
+  --output inputs/voice-preset.pcm
+
+ffmpeg -y -f s16le -ar 24000 -ac 1 \
+  -i inputs/voice-preset.pcm inputs/voice-preset.wav
+
+printf '%s\n' \
+  'Hello, I am your friendly virtual assistant, ready to help.' \
+  > inputs/voice-preset.txt
+
+docker compose up -d --force-recreate webrtc-avatar
+```
+
+After recreation, `/health` reports `preset_voice_configured: true` and the two
+preset options become selectable. The raw `.pcm` file can then be removed.
+Changing only these input files does not require an image rebuild.
 
 ## Rebuild after this update
 
@@ -132,14 +188,19 @@ Changes are intentionally introduced and measured one step at a time:
    decode; feed completed phrase frames directly into the WebRTC buffer.
 3. **v2C-A, complete:** render alternating motion frames with a configurable
    stride and preserve media duration using frame holds.
-4. **v2C-B, this archive:** overlap one future TTS request with the current
-   portrait render; measure hidden TTS time and GPU contention.
-5. **Later experiments:** test a Blackwell-compatible TensorRT path and Ditto
+4. **v2C-B, rejected:** overlap one future TTS request with the current
+   portrait render. On the shared RTX 5080 it approximately halved neural FPS,
+   so v2D defaults prefetch off.
+5. **v2D, this archive:** compare designed voice CFG 4, preset clone CFG 1 and
+   preset direction CFG 4 while recording the selected mode per phrase.
+6. **Later experiments:** add phrase-boundary motion blending, then test a
+   Blackwell-compatible TensorRT path and Ditto
    online in separate containers.
 
 The order matters. v2A establishes a warm baseline, v2B isolates file overhead,
-and v2C-A measures a deliberate temporal-quality tradeoff. v2C-B now isolates
-concurrency so GPU contention can be measured against the accepted stride run.
+and v2C-A measures a deliberate temporal-quality tradeoff. The rejected v2C-B
+result establishes that TTS and rendering should not overlap on this GPU. v2D
+therefore isolates voice identity and CFG cost without changing scheduling.
 
 ## Startup warm-up configuration
 
@@ -219,7 +280,7 @@ blinks, head motion and visual smoothness before accepting this tradeoff.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `TTS_PREFETCH` | `true` | Starts TTS for phrase N+1 while rendering phrase N. |
+| `TTS_PREFETCH` | `false` | Experimental v2C-B overlap. Keep disabled on the shared RTX 5080. |
 
 Prefetch depth is deliberately fixed at one. There is never more than one
 Breeze request active, and at most one future WAV is retained. This bounds GPU
@@ -246,15 +307,52 @@ The first phrase is never prefetched. For later phrases the UI separates:
 - `TTS wait`: time the serial phrase loop actually waited for that result;
 - `TTS overlap`: TTS time hidden behind the preceding render.
 
-On a shared laptop GPU, concurrency can slow one or both models or expose an
-out-of-memory/driver issue. Compare Neural FPS, TTS time, first-ready latency,
-GPU memory and errors against v2C-A. Immediate scheduling rollback:
+The v2C-B test confirmed this contention. Neural portrait speed fell from about
+11.6–12.0 FPS to 6.4 FPS during the strongest overlap, phrase-two rendering
+rose from about 3.35 seconds to 7.08 seconds, and TTS also slowed. Phrase four
+recovered to 11.61 FPS when no later TTS request overlapped it. The accepted
+v2D scheduling is therefore:
 
 ```yaml
 TTS_PREFETCH: "false"
 ```
 
 Then force-recreate `webrtc-avatar`; no image rebuild is required.
+
+## Voice mode configuration
+
+The selected mode is resolved once per browser request and reused for every
+phrase. The browser never supplies a reference path; it can only select one of
+the server-configured behaviors.
+
+| Browser mode | Reference | Direction | CFG default | Intended use |
+| --- | --- | --- | ---: | --- |
+| `design` | No | Browser field | `4` | Current reference-free behavior; identity may drift between separate phrase requests. |
+| `preset-clone` | WAV + exact transcript | Fixed neutral instruction | `1` | Best first test for stable identity and lower CFG cost. |
+| `preset-direction` | WAV + exact transcript | Browser field | `4` | Stable reference identity with controllable emotion, pace or delivery. |
+
+Both preset modes send the configured WAV and transcript to Breeze for every
+phrase. Breeze's current API re-encodes uploaded reference audio each request;
+v2D intentionally does not patch or cache Breeze internals yet. Compare first
+byte and total TTS before deciding whether a server-side audio-token cache is
+worth another isolated version.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `BREEZE_DEFAULT_VOICE_MODE` | `design` | Initial browser mode. A missing preset automatically falls back to design in the UI and warm-up. |
+| `BREEZE_VOICE_INSTRUCTION` | warm, clear, natural voice | Default design/direction text and initial browser value. |
+| `BREEZE_DESIGN_CFG_SCALE` | `4` | Guidance used for reference-free voice design. Legacy `BREEZE_CFG_SCALE` remains a fallback. |
+| `BREEZE_PRESET_CLONE_CFG_SCALE` | `1` | Preset clone guidance. CFG 1 avoids the additional negative-guidance branch. |
+| `BREEZE_PRESET_DIRECTION_CFG_SCALE` | `4` | Guidance used when applying a direction to the preset identity. |
+| `BREEZE_PRESET_CLONE_INSTRUCTION` | Speak naturally in the reference voice. | Neutral instruction used when the browser selects clone mode. |
+| `BREEZE_PRESET_AUDIO_PATH` | `/workspace/inputs/voice-preset.wav` | Server-controlled preset WAV. |
+| `BREEZE_PRESET_TRANSCRIPT_FILE` | `/workspace/inputs/voice-preset.txt` | UTF-8 file containing the exact reference transcript. |
+| `BREEZE_PRESET_TRANSCRIPT` | empty | Optional inline transcript overriding the `.txt` file. |
+
+The timing table adds `Voice` and `CFG` columns. For a fair A/B comparison,
+keep `TTS_PREFETCH=false`, use identical input text, allow warm-up to finish,
+and test each mode at least three times. Record voice consistency, first byte,
+total TTS, render FPS and gaps; changing modes should not change render FPS.
 
 ## Progressive phrase configuration
 
@@ -302,14 +400,21 @@ available in `server.py` or `entrypoint.sh`.
 | `RESULTS_ROOT` | `/workspace/results` | Temporary request output. Each phrase gets its own subdirectory. |
 | `DIRECT_MEMORY_RENDER` | `true` | Selects the v2B in-memory renderer; `false` selects the v2A.1 legacy MP4 path. |
 | `RENDER_STRIDE` | `2` | Neural-frame decimation used by direct memory. `1` restores full-frame v2B rendering. |
-| `TTS_PREFETCH` | `true` | Overlaps one future TTS phrase with the current render. `false` restores v2C-A scheduling. |
+| `TTS_PREFETCH` | `false` | Rejected shared-GPU overlap experiment. `true` restores v2C-B for diagnostics. |
 | `STARTUP_WARMUP` | `true` | Moves lazy model initialization into container startup. |
 | `WARMUP_TEXT` | `Hello.` | Disposable phrase used by startup warm-up. |
 | `TTS_STARTUP_WAIT_SECONDS` | `300` | Readiness timeout used before startup warm-up. |
 | `TTS_STARTUP_POLL_SECONDS` | `2` | Readiness polling interval. |
 | `BREEZE_TTS_URL` | `http://127.0.0.1:7860` | Breeze speech API used by the avatar server. |
 | `BREEZE_VOICE_INSTRUCTION` | warm, clear, natural voice | Default instruction if the browser field is empty. |
-| `BREEZE_CFG_SCALE` | `4` | Breeze instruction guidance. |
+| `BREEZE_DEFAULT_VOICE_MODE` | `design` | Initial browser mode; preset modes require configured reference files. |
+| `BREEZE_DESIGN_CFG_SCALE` | `4` | Voice-design instruction guidance. |
+| `BREEZE_PRESET_CLONE_CFG_SCALE` | `1` | Preset clone guidance without the extra CFG branch. |
+| `BREEZE_PRESET_DIRECTION_CFG_SCALE` | `4` | Preset identity plus direction guidance. |
+| `BREEZE_PRESET_AUDIO_PATH` | `/workspace/inputs/voice-preset.wav` | Fixed reference audio used by both preset modes. |
+| `BREEZE_PRESET_TRANSCRIPT_FILE` | `/workspace/inputs/voice-preset.txt` | Exact reference transcript file. |
+| `BREEZE_PRESET_TRANSCRIPT` | empty | Optional inline transcript overriding the file. |
+| `BREEZE_CFG_SCALE` | unset | Backward-compatible fallback for `BREEZE_DESIGN_CFG_SCALE`. |
 | `BREEZE_SEED` | `42` | Breeze generation seed. |
 | `JOYVASA_CFG_SCALE` | `2.8` | JoyVASA audio-to-motion guidance. |
 | `MAX_TEXT_LENGTH` | `500` | Maximum accepted browser input. |
@@ -467,32 +572,51 @@ The gap equation now matches the logs almost exactly. For phrase two:
 This confirms serial scheduling, rather than WebRTC, accounts for the remaining
 pause.
 
-## v2C-B benchmark procedure
+## Recorded v2C-B prefetch result
 
-Use the same four-phrase text and keep all stride/phrase settings unchanged.
+The bounded prefetch behaved correctly, but the shared RTX 5080 could not run
+Breeze and FasterLivePortrait efficiently at the same time.
 
-1. Rebuild and start v2C-B; wait for startup warm-up.
-2. Confirm `/health` reports build `neural-avatar-v2c-b-tts-prefetch`, stride
-   `2`, `tts_prefetch: true`, and `tts_prefetch_depth: 1`.
-3. Run the text twice without restarting services and keep the second run.
-4. Confirm phrase one reports approximately zero TTS overlap. Later phrases
-   should report `prefetched=True` in logs and nonzero TTS overlap in the UI.
-5. Compare TTS, Neural FPS, render time, first-ready time, gaps and GPU memory
-   against v2C-A. Also check for CUDA/OOM errors.
+| Phrase | TTS | TTS overlap | Frame loop | Neural FPS | Pipeline | Gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Hello!` | 748 ms | 0 ms | 1,404 ms | 6.41 | 1,683 ms | 0 ms |
+| `This is my first neural streaming avatar test.` | 4,067 ms | 1,684 ms | 6,807 ms | 6.46 | 7,079 ms | 8,740 ms |
+| long third phrase | 9,678 ms | 7,080 ms | 9,038 ms | 9.18 | 9,592 ms | 8,680 ms |
+| final phrase | 4,682 ms | 4,682 ms | 2,928 ms | 11.61 | 3,053 ms | 0 ms |
 
-Ideal no-contention prediction from the v2C-A timings:
+Phrase four's recovery after concurrent work ended is the clearest evidence.
+The experiment was rejected and prefetch now defaults off.
 
-| Phrase | Predicted TTS wait | Predicted gap |
-| --- | ---: | ---: |
-| 1 | 668 ms | 0 ms |
-| 2 | about 2,070 ms | about 4,870 ms |
-| 3 | about 0 ms | about 0 ms |
-| 4 | about 0 ms | about 0 ms |
+## Recorded v2D serial baseline before voice comparison
 
-Real values may be worse because Breeze and FasterLivePortrait share the RTX
-5080. Accept v2C-B only if it lowers total gap without a CUDA failure, obvious
-quality change, or more than roughly 20% regression in first-ready, TTS or
-Neural FPS. Otherwise set `TTS_PREFETCH=false` and retain v2C-A.
+With prefetch disabled, the supplied run completed without CUDA, cuSOLVER,
+ONNX execution or application errors. The harmless CoreML-provider and ONNX
+shape warnings were unchanged.
+
+| Phrase | TTS | First byte | Frame loop | Neural FPS | Pipeline | Media | Gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Hello!` | 695 ms | 208 ms | 665 ms | 12.03 | 822 ms | 0.64 s | 0 ms |
+| `This is a neural streaming avatar test.` | 2,941 ms | 196 ms | 3,194 ms | 11.58 | 3,352 ms | 2.96 s | 5,660 ms |
+| `I love these test.` | 1,693 ms | 195 ms | 1,796 ms | 11.69 | 1,918 ms | 1.68 s | 660 ms |
+| `It makes me feel to come alive` | 2,078 ms | 194 ms | 2,252 ms | 11.54 | 2,416 ms | 2.08 s | 2,800 ms |
+
+The gaps match `current TTS + current render − previous media` within normal
+packet timing. This is the control run for the v2D voice-mode comparison.
+
+## v2D voice comparison procedure
+
+1. Keep `TTS_PREFETCH=false`, `RENDER_STRIDE=2` and all phrase thresholds
+   unchanged.
+2. Confirm `/health` reports build `neural-avatar-v2d-voice-modes` and
+   `preset_voice_configured: true` after adding the preset files.
+3. Use the same text for Designed voice, Preset voice (clone), and Preset voice
+   + direction. Run each mode three times without restarting services.
+4. Compare Voice, CFG, TTS, First byte, Neural FPS and Gap. Also judge whether
+   identity remains stable at phrase boundaries.
+5. Accept preset clone as the latency default only if identity improves and its
+   first-byte/total-TTS measurements are no worse than the design median.
+   Otherwise retain it as a quality option and investigate reference-token
+   caching separately.
 
 ## Decision log
 
@@ -558,16 +682,41 @@ Neural FPS. Otherwise set `TTS_PREFETCH=false` and retain v2C-A.
 
 - **Observed v2C-A result:** stride two cut comparable render time by 46.7–48.8%,
   but serial `TTS + render − buffer` still explained every remaining gap.
-- **Decision:** start only phrase N+1 TTS while rendering phrase N and measure
-  total TTS, blocking wait and hidden overlap separately.
+- **Experiment:** start only phrase N+1 TTS while rendering phrase N and
+  measure total TTS, blocking wait and hidden overlap separately.
 - **Reason:** later TTS calls can fit entirely inside the preceding long render
   in the measured four-phrase workload, potentially eliminating later gaps.
 - **Risk:** both services share one GPU. Concurrent kernels or memory pressure
   can slow first-ready/render/TTS or cause CUDA failure.
 - **Bound:** prefetch depth is fixed at one; multiple simultaneous Breeze
   requests are never issued, and unfinished work is cancelled on failure.
-- **Rollback:** set `TTS_PREFETCH=false` and recreate `webrtc-avatar`; no rebuild
-  is required.
+- **Measured result:** phrase-one and phrase-two neural FPS fell to 6.41 and
+  6.46 while comparable serial runs sustained about 12.03 and 11.58 FPS.
+  Phrase-two render rose to 7.079 seconds. Phrase four recovered to 11.61 FPS
+  after overlap ended.
+- **Decision:** reject shared-GPU prefetch and make `TTS_PREFETCH=false` the v2D
+  default. It can still be enabled for diagnostics.
+
+### v2D — selectable designed and preset voices
+
+- **Observed serial result:** with prefetch disabled, neural FPS recovered to
+  11.54–12.03 and the four measured gaps matched
+  `current TTS + current render − previous buffered media`.
+- **Observed voice behavior:** reference-free Voice Design starts a separate
+  sampled generation for every phrase; a fixed description and seed do not
+  provide persistent speaker identity.
+- **Decision:** expose `design`, `preset-clone` and `preset-direction` without
+  allowing the browser to choose arbitrary files.
+- **Reason:** a fixed reference WAV and exact transcript should stabilize
+  identity. Clone mode also permits CFG 1, while design/direction retain CFG 4.
+- **Measurement:** add Voice and CFG to every phrase row and log entry; compare
+  first byte and total TTS because the stock Breeze API re-encodes reference
+  audio on each request.
+- **Intentionally deferred:** Breeze reference-token caching, simultaneous
+  TTS/render work, phrase-boundary motion blending and incremental PCM/motion
+  streaming.
+- **Rollback:** select Designed voice in the UI or set
+  `BREEZE_DEFAULT_VOICE_MODE=design`; the v2C-A serial render path is unchanged.
 
 ## WebRTC behavior
 
@@ -625,10 +774,10 @@ Hello! This is phrase two. This is phrase three, generated later.
 ### Playback pauses between phrases
 
 Look at the `Gap` column. If it is positive, generation is slower than queued
-media playback. Keep the default phrase settings during the v2C-B benchmark.
-Longer phrases can amortize fixed overhead, but cannot solve a sustained
-production ratio above 1.0. v2C-B overlaps TTS but still batches a full phrase.
-Incremental frame append is the remaining FasterLivePortrait experiment.
+media playback. Longer phrases can amortize fixed overhead, but cannot solve a
+sustained production ratio above 1.0. v2D keeps prefetch disabled because the
+shared-GPU overlap made total work slower. Incremental PCM/motion/frame delivery
+or an online renderer remains necessary for truly continuous playback.
 
 ### Prefetch makes performance worse or causes a CUDA error
 
@@ -636,6 +785,29 @@ Set `TTS_PREFETCH: "false"` and force-recreate `webrtc-avatar`. Compare total
 TTS, TTS wait, TTS overlap, render time and Neural FPS. A high overlap value is
 not a win if GPU contention increases the combined wall time or destabilizes
 the driver.
+
+### Preset voice options say `not configured`
+
+Both `inputs/voice-preset.wav` and `inputs/voice-preset.txt` must exist, and the
+transcript file cannot be empty. Confirm from the project directory:
+
+```bash
+test -s inputs/voice-preset.wav
+test -s inputs/voice-preset.txt
+docker compose up -d --force-recreate webrtc-avatar
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+```
+
+Look for `preset_voice_configured: true`. Do not use an approximate transcript;
+it must match the spoken reference.
+
+### Preset voice is consistent but slower
+
+Compare `First byte` and `TTS` against Designed voice with identical text.
+Reference audio is encoded for every phrase in this version. If first-byte time
+increases materially while CFG 1 does not compensate during generation, the
+next isolated experiment is a stable preset ID with cached reference tokens in
+the Breeze service. Do not re-enable TTS prefetch during this comparison.
 
 ### Backend says `legacy-mp4`
 
@@ -721,10 +893,11 @@ docker compose down
 
 ## Next architectural step: Ditto online
 
-After accepting or rejecting v2C-B, the remaining FasterLivePortrait experiment
-is incremental frame append so playback can begin before a complete phrase is
-rendered. That requires a thread-safe bounded frame queue and careful audio
-start timing; it should remain separate from the current prefetch measurement.
+After the v2D voice comparison, the remaining FasterLivePortrait experiment is
+phrase-boundary blending followed by incremental frame append so playback can
+begin before a complete phrase is rendered. That requires a thread-safe bounded
+frame queue and careful audio start timing; it should remain separate from the
+voice measurement.
 
 For truly continuous sub-second interaction, the later migration target is an
 online renderer such as Ditto. That architecture should accept incremental

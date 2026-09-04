@@ -1,53 +1,58 @@
-# neural-avatar-v2c-b-tts-prefetch
+# neural-avatar-v2d-voice-modes
 
 ## Purpose
 
-Measure whether a bounded overlap between next-phrase Breeze TTS and
-current-phrase FasterLivePortrait rendering reduces pauses on the shared RTX
-5080 without destabilizing or slowing either model.
+Compare voice consistency and Breeze TTS cost without changing the accepted
+serial, direct-memory, stride-two avatar renderer.
 
 ## Changed
 
-- Added `TTS_PREFETCH`, default `true`, to overlap TTS for phrase N+1 with
-  rendering phrase N.
-- Fixed prefetch depth at one: there is never more than one Breeze request and
-  at most one future WAV.
-- Added cancellation/cleanup for unfinished prefetch work on request failure.
-- Added total TTS, blocking TTS wait, hidden TTS overlap and prefetched status to
-  server logs and WebRTC metrics.
-- Added TTS wait/overlap columns and prefetch runtime status to the browser.
-- Added prefetch status/depth and a unique v2C-B build marker to `/health`.
-- Recorded the supplied v2C-A benchmark and its exact gap equation.
-- Added v2C-B predictions, acceptance criteria, GPU-contention checks, decision
-  record and runtime rollback to `README.md`.
+- Added browser-selectable `design`, `preset-clone` and `preset-direction`
+  modes.
+- A preset can be an authorized WAV or one Breeze-designed sentence generated
+  once; both use the same fixed WAV plus exact-transcript configuration.
+- Preset files are server-controlled. The browser selects a mode but cannot
+  supply a path.
+- Designed voice defaults to CFG 4, preset clone to CFG 1, and preset direction
+  to CFG 4.
+- Preset options remain visibly disabled until both `voice-preset.wav` and
+  `voice-preset.txt` are valid.
+- Added Voice and CFG to per-phrase UI metrics and server logs.
+- Added voice configuration and preset readiness to `/health` and
+  `/client-config`.
+- Changed `TTS_PREFETCH` default to `false` after v2C-B shared-GPU contention
+  approximately halved portrait inference speed.
+- Documented preset generation, external reference setup, exact rollback,
+  v2C-B rejection, the recovered serial baseline, and the v2D A/B procedure.
 
 ## Deliberately not changed
 
-- Phrase splitting thresholds, phrase order and one-at-a-time playback.
-- Breeze, JoyVASA or FasterLivePortrait model configuration.
-- WebRTC's 30 FPS video and 48 kHz audio output.
-- Phrase-level batching: playback still waits for all frames in a phrase.
-- Paste-back remains disabled because of the earlier cuSOLVER failure.
-- Render stride remains two; no interpolation or incremental frame append is
-  included.
+- Breeze itself is unmodified and re-encodes uploaded reference audio per
+  phrase; reference-token caching is a possible later experiment.
+- Phrase splitting, phrase-level batching, playback order and WebRTC formats.
+- JoyVASA and FasterLivePortrait model configuration.
+- Direct-memory render and stride two.
+- Paste-back remains disabled.
+- No phrase-boundary blend or incremental PCM/motion/frame delivery yet.
 
 ## Expected result
 
-- `/health` reports build `neural-avatar-v2c-b-tts-prefetch`, prefetch true and
-  depth one.
-- Phrase one reports no overlap; later phrases report nonzero overlap.
-- With no GPU contention, the measured four-phrase workload predicts phrase-two
-  gap near 4.87 seconds and later gaps near zero.
-- Acceptance depends on total gap, first-ready, total TTS, Neural FPS, GPU
-  memory and absence of CUDA errors—not overlap alone.
+- `/health` reports build `neural-avatar-v2d-voice-modes`, prefetch false and
+  all three mode IDs.
+- Without preset files, only Designed voice is selectable.
+- With a nonempty preset WAV and exact transcript, clone and direction modes
+  become selectable after recreating `webrtc-avatar`.
+- Every phrase timing row identifies its voice mode and CFG scale.
+- Preset modes should stabilize voice identity; whether clone CFG 1 also lowers
+  TTS time is intentionally left for measurement.
 
 ## Rollback
 
-Set `TTS_PREFETCH: "false"` under `webrtc-avatar.environment` and run:
+Select Designed voice in the browser or set:
 
-```bash
-docker compose up -d --force-recreate webrtc-avatar
+```yaml
+BREEZE_DEFAULT_VOICE_MODE: "design"
+TTS_PREFETCH: "false"
 ```
 
-No rebuild is required. This restores exact v2C-A serial scheduling while
-retaining direct memory and stride two.
+Then recreate `webrtc-avatar`. No rebuild is required for a runtime rollback.

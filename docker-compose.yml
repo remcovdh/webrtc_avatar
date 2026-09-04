@@ -62,9 +62,26 @@ services:
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
       RENDER_STRIDE: "2"
-      # v2C-B overlaps at most one future Breeze request with the current
-      # avatar render. Set false for exact v2C-A serial scheduling.
+      # v2C-B testing showed that concurrent TTS approximately halved portrait
+      # FPS on the shared laptop GPU. Keep serial scheduling for v2D.
       TTS_PREFETCH: "false"
+      # Voice modes exposed in the browser:
+      #   design           = reference-free voice design with CFG 4
+      #   preset-clone     = fixed reference identity with CFG 1
+      #   preset-direction = fixed identity plus this direction with CFG 4
+      BREEZE_DEFAULT_VOICE_MODE: "design"
+      BREEZE_VOICE_INSTRUCTION: "A warm, clear, natural voice with a calm conversational delivery."
+      BREEZE_DESIGN_CFG_SCALE: "4"
+      BREEZE_PRESET_CLONE_CFG_SCALE: "1"
+      BREEZE_PRESET_DIRECTION_CFG_SCALE: "4"
+      BREEZE_PRESET_CLONE_INSTRUCTION: "Speak naturally in the reference voice."
+      # A generated Breeze sentence or an owned/licensed WAV can be the preset.
+      # Preset modes become selectable only when both the WAV and its exact
+      # transcript file exist in ./inputs.
+      BREEZE_PRESET_AUDIO_PATH: /workspace/inputs/voice-preset.wav
+      BREEZE_PRESET_TRANSCRIPT_FILE: /workspace/inputs/voice-preset.txt
+      # Optional alternative to the .txt file; leave empty to read the file.
+      BREEZE_PRESET_TRANSCRIPT: ""
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"

@@ -17,8 +17,9 @@
     h1 { margin:0; font-size:25px; letter-spacing:-.03em; }
     .lede { margin:-8px 0 2px; color:var(--muted); }
     label { display:grid; gap:7px; color:#cdd3da; font-size:13px; }
-    textarea,input { width:100%; border:1px solid var(--line); border-radius:10px; background:#0d1015; color:var(--ink); padding:11px 12px; font:inherit; outline:none; resize:vertical; }
-    textarea:focus,input:focus { border-color:var(--accent); box-shadow:0 0 0 3px #7c5cff26; }
+    textarea,input,select { width:100%; border:1px solid var(--line); border-radius:10px; background:#0d1015; color:var(--ink); padding:11px 12px; font:inherit; outline:none; resize:vertical; }
+    textarea:focus,input:focus,select:focus { border-color:var(--accent); box-shadow:0 0 0 3px #7c5cff26; }
+    input:disabled { opacity:.55; cursor:not-allowed; }
     textarea { min-height:110px; }
     button { border:0; border-radius:10px; padding:12px 14px; background:var(--accent); color:white; font:700 14px inherit; cursor:pointer; }
     button.secondary { background:#252b34; }
@@ -51,7 +52,9 @@
       <h1>Neural Avatar Lab</h1>
       <p class="lede">Breeze TTS 2 · JoyVASA · FasterLivePortrait · WebRTC</p>
       <label>Speech<textarea id="textInput" maxlength="500">Hello! This is my first neural streaming avatar test.</textarea></label>
-      <label>Voice direction<input id="instructionInput" value="A warm, clear, natural voice with a calm conversational delivery."></label>
+      <label>Voice mode<select id="voiceModeInput"></select></label>
+      <div class="details" id="voiceModeDetails">Loading voice modes…</div>
+      <label id="instructionLabel">Voice direction<input id="instructionInput" value="A warm, clear, natural voice with a calm conversational delivery."></label>
       <div class="actions">
         <button id="sendBtn" disabled>Generate &amp; speak</button>
         <button id="audioBtn" class="secondary">Enable audio</button>
@@ -64,8 +67,8 @@
         </div>
         <div class="timing-wrap">
           <table>
-            <thead><tr><th>Phrase</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Backend</th><th>Stride</th><th>Motion</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
-            <tbody id="timingRows"><tr><td class="empty" colspan="18">Timings appear here</td></tr></tbody>
+            <thead><tr><th>Phrase</th><th>Voice</th><th>CFG</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Backend</th><th>Stride</th><th>Motion</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
+            <tbody id="timingRows"><tr><td class="empty" colspan="20">Timings appear here</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -77,12 +80,15 @@
     const statusBox = document.querySelector("#status");
     const badge = document.querySelector("#connectionBadge");
     const textInput = document.querySelector("#textInput");
+    const voiceModeInput = document.querySelector("#voiceModeInput");
+    const voiceModeDetails = document.querySelector("#voiceModeDetails");
     const instructionInput = document.querySelector("#instructionInput");
     const sendBtn = document.querySelector("#sendBtn");
     const audioBtn = document.querySelector("#audioBtn");
     const timingRows = document.querySelector("#timingRows");
     const timingSummary = document.querySelector("#timingSummary");
     const runtimeDetails = document.querySelector("#runtimeDetails");
+    let voiceModes = [];
     let pc, channel;
     const stream = new MediaStream();
     video.srcObject = stream;
@@ -90,7 +96,7 @@
     function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
     function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
     function resetTimings() {
-      timingRows.innerHTML = '<tr><td class="empty" colspan="18">Splitting text into phrases…</td></tr>';
+      timingRows.innerHTML = '<tr><td class="empty" colspan="20">Splitting text into phrases…</td></tr>';
       timingSummary.textContent = "Waiting for first phrase";
     }
     function formatMs(value) { return `${Math.max(0, Number(value || 0))} ms`; }
@@ -100,6 +106,8 @@
       const row = document.createElement("tr");
       const values = [
         `${message.chunk}/${message.chunks} ${message.phrase || ""}`,
+        message.voice_mode || "design",
+        Number(message.voice_cfg_scale || 1).toFixed(1),
         formatMs(message.tts_ms),
         formatMs(message.tts_wait_ms),
         formatMs(message.tts_overlap_ms),
@@ -127,6 +135,32 @@
       timingRows.appendChild(row);
       if (message.first_ready_ms != null) timingSummary.textContent = `First playback ready in ${formatMs(message.first_ready_ms)}`;
     }
+    function updateVoiceControls() {
+      const selected = voiceModes.find(mode => mode.id === voiceModeInput.value);
+      const cloneOnly = selected?.id === "preset-clone";
+      instructionInput.disabled = cloneOnly;
+      voiceModeDetails.textContent = selected
+        ? `${selected.description} CFG ${Number(selected.cfgScale || 1).toFixed(1)}${selected.available ? "" : " · preset files missing"}`
+        : "Voice mode unavailable";
+    }
+    function configureVoiceModes(config) {
+      voiceModes = Array.isArray(config.voiceModes) ? config.voiceModes : [];
+      if (!voiceModes.length) {
+        voiceModes = [{ id:"design", label:"Designed voice", description:"Create a voice from the direction.", available:true, cfgScale:4 }];
+      }
+      voiceModeInput.innerHTML = "";
+      for (const mode of voiceModes) {
+        const option = document.createElement("option");
+        option.value = mode.id;
+        option.textContent = `${mode.label}${mode.available ? "" : " (not configured)"}`;
+        option.disabled = !mode.available;
+        voiceModeInput.appendChild(option);
+      }
+      instructionInput.value = config.defaultVoiceInstruction || instructionInput.value;
+      voiceModeInput.value = config.defaultVoiceMode || "design";
+      if (!voiceModeInput.value) voiceModeInput.value = "design";
+      updateVoiceControls();
+    }
     async function waitForIceGathering(peer) {
       if (peer.iceGatheringState === "complete") return;
       await new Promise(resolve => {
@@ -150,8 +184,10 @@
             : `warm-up failed: ${healthBody.startup_warmup_error || "unknown error"}`
           : "warm-up disabled";
         const prefetch = healthBody.tts_prefetch ? "TTS prefetch on" : "TTS prefetch off";
-        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · stride ${healthBody.render_stride || 1} · ${prefetch} · ${warmup}`;
+        const preset = healthBody.preset_voice_configured ? "preset ready" : "preset not configured";
+        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · stride ${healthBody.render_stride || 1} · ${prefetch} · ${preset} · ${warmup}`;
         const config = await fetch("/client-config").then(response => response.json());
+        configureVoiceModes(config);
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
         channel = pc.createDataChannel("avatar-control");
         pc.addTransceiver("video", { direction: "recvonly" });
@@ -177,7 +213,7 @@
             setReady(true);
           } else if (message.type === "plan") {
             timingSummary.textContent = `${message.phrases?.length || 1} phrase(s)`;
-            setStatus(message.message || "Phrase plan ready");
+            setStatus(message.message || `Phrase plan ready with ${message.voice_mode || "design"}`);
           } else if (message.type === "metrics") {
             appendTiming(message);
           } else if (message.type === "playing") {
@@ -206,8 +242,13 @@
       const text = textInput.value.trim();
       if (!text || channel?.readyState !== "open") return;
       resetTimings(); sendBtn.disabled = true; setStatus("Request sent…");
-      channel.send(JSON.stringify({ text, instruction:instructionInput.value.trim() }));
+      channel.send(JSON.stringify({
+        text,
+        instruction:instructionInput.value.trim(),
+        voice_mode:voiceModeInput.value,
+      }));
     }
+    voiceModeInput.addEventListener("change", updateVoiceControls);
     sendBtn.addEventListener("click", sendText);
     textInput.addEventListener("keydown", event => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") sendText();
