@@ -1,10 +1,10 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2e1-benchmark-handshake-fix`
+Current build: `neural-avatar-v2f-adaptive-stride`
 
-This archive is v2E.1 of the latency optimization series. It retains all v2D
-voice modes, adds the v2E repeatable headless benchmark, and fixes its initial
-WebRTC readiness handshake. One command can generate
+This archive is v2F of the latency optimization series. It retains the v2E.1
+benchmark and adds an adaptive stride 2→3 render policy based on measured
+playback-buffer pressure. One command can generate
 a deterministic Breeze reference fixture, exercise the same WebRTC/API path as
 the browser, run identical text through every voice mode, and save JSON, CSV
 and Markdown results. Optional stride/prefetch matrices make future changes
@@ -99,10 +99,13 @@ Expected progressive fields:
 
 ```json
 {
-  "server_build": "neural-avatar-v2e1-benchmark-handshake-fix",
+  "server_build": "neural-avatar-v2f-adaptive-stride",
   "render_backend": "direct-memory",
   "direct_memory_render": true,
   "render_stride": 2,
+  "adaptive_render_stride": true,
+  "catchup_render_stride": 3,
+  "catchup_buffer_seconds": 0.75,
   "tts_prefetch": false,
   "tts_prefetch_depth": 0,
   "default_voice_mode": "design",
@@ -163,7 +166,7 @@ Each scenario creates a timestamped directory:
 results/benchmarks/
 ├── comparison-20260903T211500Z.csv
 ├── comparison-20260903T211500Z.md
-└── stride-2_prefetch-false/
+└── stride-2_adaptive-true_catchup-3_prefetch-false/
     └── 20260903T210000Z/
         ├── benchmark.json  # environment, fixture, raw events and summaries
         ├── phrases.csv     # one row per phrase
@@ -178,6 +181,9 @@ Useful controls:
 | `BENCHMARK_WARMUPS` | `1` | Short unmeasured warm-ups per mode. This moves preset cold start out of measured results while retaining its raw warm-up record. |
 | `BENCHMARK_MODES` | all three modes | Comma-separated browser mode IDs. |
 | `BENCHMARK_RENDER_STRIDES` | `2` | Space-separated render-stride matrix. |
+| `BENCHMARK_ADAPTIVE_VALUES` | `true` | Space-separated adaptive-policy matrix. Use `"false true"` for the v2F A/B test. |
+| `BENCHMARK_CATCHUP_STRIDE` | `3` | Stride used when adaptive mode detects low buffer. |
+| `BENCHMARK_CATCHUP_BUFFER_SECONDS` | `0.75` | Switch to catch-up stride below this buffer level. |
 | `BENCHMARK_PREFETCH_VALUES` | `false` | Space-separated `true`/`false` matrix. |
 | `REGENERATE_PRESET` | `0` | Set `1` to deliberately regenerate the selected benchmark preset pair. |
 | `BENCHMARK_BUILD` | `0` | Set `1` to rebuild benchmark/avatar images before running. |
@@ -189,8 +195,12 @@ Examples:
 # Quick smoke test: one measured run per mode
 BENCHMARK_REPEATS=1 ./benchmark.sh
 
-# Compare accepted stride two with full-frame stride one
-BENCHMARK_RENDER_STRIDES="2 1" ./benchmark.sh
+# Compare fixed stride 2 with adaptive stride 2→3
+BENCHMARK_MODES=design BENCHMARK_ADAPTIVE_VALUES="false true" ./benchmark.sh
+
+# Reproduce the fixed-stride experiment (disable v2F adaptation)
+BENCHMARK_MODES=design BENCHMARK_ADAPTIVE_VALUES=false \
+  BENCHMARK_RENDER_STRIDES="2 3 4" ./benchmark.sh
 
 # Reproduce the rejected prefetch experiment as a separate scenario
 BENCHMARK_PREFETCH_VALUES="false true" ./benchmark.sh
@@ -213,7 +223,7 @@ The top-level comparison files include every discovered scenario and record
 hashes for both the benchmark text and preset WAV. Only treat rows with matching
 hashes as a controlled speed comparison.
 
-To run the v2E.1 handshake regression tests in the built image:
+To run the handshake regression tests in the built image:
 
 ```bash
 docker compose run --rm --no-deps --entrypoint python benchmark-fixture \
@@ -299,9 +309,11 @@ Changes are intentionally introduced and measured one step at a time:
    preset direction CFG 4 while recording the selected mode per phrase.
 6. **v2E, complete:** automate canonical preset creation and repeatable
    headless WebRTC comparisons with saved machine-readable reports.
-7. **v2E.1, this archive:** make the initial benchmark data-channel handshake
+7. **v2E.1, complete:** make the initial benchmark data-channel handshake
    reliable across aiortc channel-open event ordering.
-8. **Later experiments:** add phrase-boundary motion blending, then test a
+8. **v2F, this archive:** keep base stride 2 but use the measured stride 3
+   catch-up mode whenever the media buffer is below 0.75 seconds.
+9. **Later experiments:** add phrase-boundary motion blending, then test a
    Blackwell-compatible TensorRT path and Ditto
    online in separate containers.
 
@@ -336,7 +348,10 @@ STARTUP_WARMUP: "false"
 | --- | --- | --- |
 | `DIRECT_MEMORY_RENDER` | `true` | Uses JoyVASA motion and FasterLivePortrait crop frames directly in memory. |
 | `AVATAR_PASTE_BACK` | `false` | Required for the v2B direct path; avoids the unstable GPU paste-back operation. |
-| `RENDER_STRIDE` | `2` | Renders every second JoyVASA motion frame. Use `1` for full v2B temporal quality. |
+| `RENDER_STRIDE` | `2` | Base stride used for the first phrase and while the buffer is healthy. |
+| `ADAPTIVE_RENDER_STRIDE` | `true` | Enables buffer-aware selection between base and catch-up stride. |
+| `CATCHUP_RENDER_STRIDE` | `3` | Lower-cost stride selected while the buffer is below its threshold. |
+| `CATCHUP_BUFFER_SECONDS` | `0.75` | Minimum healthy buffered media; below this value selects catch-up mode. |
 
 The direct backend removes these per-phrase operations:
 
@@ -349,6 +364,19 @@ It does not change JoyVASA motion, FasterLivePortrait frame inference, output
 resolution, audio format or WebRTC timing. It also does not yet append each
 frame while inference is running; a phrase becomes playable after its entire
 frame loop completes.
+
+The v2F policy always renders phrase 1 at the base stride for initial visual
+quality. Before rendering every later phrase, it samples the synchronized
+audio/video buffer. Below 0.75 seconds it selects stride 3; otherwise it keeps
+stride 2. The phrase metric records the buffer level and one of
+`first-phrase-quality`, `low-buffer-catchup`, `buffer-healthy` or `fixed`.
+
+Immediate v2F rollback while retaining direct-memory rendering:
+
+```yaml
+ADAPTIVE_RENDER_STRIDE: "false"
+RENDER_STRIDE: "2"
+```
 
 Immediate A/B rollback:
 
@@ -507,7 +535,10 @@ available in `server.py` or `entrypoint.sh`.
 | `FLP_CONFIG_PATH` | `/workspace/FasterLivePortrait/configs/onnx_infer.yaml` | FasterLivePortrait ONNX configuration. |
 | `RESULTS_ROOT` | `/workspace/results` | Temporary request output. Each phrase gets its own subdirectory. |
 | `DIRECT_MEMORY_RENDER` | `true` | Selects the v2B in-memory renderer; `false` selects the v2A.1 legacy MP4 path. |
-| `RENDER_STRIDE` | `2` | Neural-frame decimation used by direct memory. `1` restores full-frame v2B rendering. |
+| `RENDER_STRIDE` | `2` | Base neural-frame decimation used by direct memory. |
+| `ADAPTIVE_RENDER_STRIDE` | `true` | Enables the v2F buffer-aware render policy. |
+| `CATCHUP_RENDER_STRIDE` | `3` | Stride used when adaptive catch-up is selected. Never lower than the base stride. |
+| `CATCHUP_BUFFER_SECONDS` | `0.75` | Catch-up threshold measured immediately before each phrase render. |
 | `TTS_PREFETCH` | `false` | Rejected shared-GPU overlap experiment. `true` restores v2C-B for diagnostics. |
 | `STARTUP_WARMUP` | `true` | Moves lazy model initialization into container startup. |
 | `WARMUP_TEXT` | `Hello.` | Disposable phrase used by startup warm-up. |
@@ -735,7 +766,7 @@ text, calculate TTS/render RTF, and retain raw output automatically.
 
 1. Keep `TTS_PREFETCH=false`, `RENDER_STRIDE=2` and all phrase thresholds
    unchanged.
-2. Confirm `/health` reports build `neural-avatar-v2e1-benchmark-handshake-fix` and
+2. Confirm `/health` reports build `neural-avatar-v2f-adaptive-stride` and
    `preset_voice_configured: true` after adding the preset files.
 3. Use the same text for Designed voice, Preset voice (clone), and Preset voice
    + direction. Run each mode three times without restarting services.
@@ -879,6 +910,26 @@ text, calculate TTS/render RTF, and retain raw output automatically.
 - **Scope:** this changes only connection setup; benchmark text, warm-ups,
   metrics, voice modes and renderer settings remain identical to v2E.
 
+### v2F — adaptive stride 2→3
+
+- **Measured control:** fixed stride 2 produced render RTF 1.146, first-ready
+  1.146 seconds and 9.42 seconds of gaps across three repeatable design runs.
+- **Measured alternative:** fixed stride 3 reduced render RTF to 0.781 and gaps
+  to 7.34 seconds while neural throughput remained stable near 11.8 rendered
+  frames per second. Stride 4 reduced gaps further to 6.32 seconds but playback
+  fell to 6.25 FPS.
+- **Decision:** retain stride 2 for phrase 1 and a healthy media queue; select
+  stride 3 below 0.75 seconds buffered. This takes the best measured speed gain
+  without making stride 4's lower temporal quality the default.
+- **Measurement:** every phrase reports whether adaptation was enabled, buffer
+  seconds before render, selected stride, and decision reason. Benchmark
+  scenarios include base stride, adaptive state and catch-up stride.
+- **Rollback:** set `ADAPTIVE_RENDER_STRIDE=false`; fixed stride behavior is
+  unchanged.
+- **Known limit:** TTS remains near 1.0 RTF, so v2F can shorten but cannot
+  eliminate gaps. True continuous delivery still needs a streaming renderer
+  such as Ditto and/or substantially faster TTS.
+
 ## WebRTC behavior
 
 The connection remains open between requests. The server sends:
@@ -921,7 +972,7 @@ PyTorch's restricted checkpoint loading globally.
 ### Benchmark times out in `AvatarBenchmarkClient.connect`
 
 Confirm `/health` reports
-`server_build: neural-avatar-v2e1-benchmark-handshake-fix`. If it reports v2E,
+`server_build: neural-avatar-v2f-adaptive-stride`. If it reports v2E.1,
 the old image is still running. Rebuild and force-recreate the avatar. v2E.1
 does not require a server `ready` event once the client data channel is open.
 

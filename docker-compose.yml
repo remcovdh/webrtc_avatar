@@ -62,6 +62,11 @@ services:
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
       RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-2}"
+      # v2F keeps stride 2 for the first phrase / a healthy queue and switches
+      # to stride 3 when less than 0.75 seconds remains buffered.
+      ADAPTIVE_RENDER_STRIDE: "${AVATAR_ADAPTIVE_RENDER_STRIDE:-true}"
+      CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-3}"
+      CATCHUP_BUFFER_SECONDS: "${AVATAR_CATCHUP_BUFFER_SECONDS:-0.75}"
       # v2C-B testing showed that concurrent TTS approximately halved portrait
       # FPS on the shared laptop GPU. Keep serial scheduling for v2E.
       TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-false}"

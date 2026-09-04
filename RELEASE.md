@@ -1,4 +1,19 @@
-# neural-avatar-v2e1-benchmark-handshake-fix
+# neural-avatar-v2f-adaptive-stride
+
+## v2F optimization
+
+- Adds an adaptive render policy using base stride 2 and catch-up stride 3.
+- Phrase 1 retains base-stride quality. Later phrases select catch-up below
+  0.75 seconds buffered and return to base stride when the queue is healthy.
+- Adds `ADAPTIVE_RENDER_STRIDE`, `CATCHUP_RENDER_STRIDE` and
+  `CATCHUP_BUFFER_SECONDS` with Compose overrides.
+- Adds selected stride, buffer-before-render and decision reason to logs, UI,
+  JSON and phrase CSV metrics.
+- Extends the benchmark with fixed/adaptive scenario matrices and policy-aware
+  scenario names.
+- Based on the three-repeat RTX 5080 result: stride 3 reduced render RTF from
+  1.146 to 0.781 and gaps from 9.42 to 7.34 seconds. Stride 4 was not selected
+  as the default because its playback rate is only 6.25 FPS.
 
 ## v2E.1 correction
 
@@ -15,7 +30,7 @@
 ## Purpose
 
 Replace ad-hoc timing comparisons with a repeatable end-to-end harness while
-preserving all v2D voice choices and the accepted serial renderer defaults.
+preserving all voice choices and the accepted serial TTS/render scheduling.
 
 ## Added
 
@@ -52,7 +67,7 @@ preserving all v2D voice choices and the accepted serial renderer defaults.
 ## Deliberately not changed
 
 - Voice generation, JoyVASA or FasterLivePortrait algorithms.
-- Direct-memory stride-two production defaults.
+- Direct-memory rendering and a base stride of two.
 - TTS prefetch remains disabled by default.
 - Breeze still re-encodes reference audio for every phrase.
 - Voice identity/naturalness and visual lip sync still need human assessment.

@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2e1-benchmark-handshake-fix"
+SERVER_BUILD = "neural-avatar-v2f-adaptive-stride"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -108,6 +108,13 @@ MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
 DIRECT_MEMORY_RENDER = _env_bool("DIRECT_MEMORY_RENDER", True)
 RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
+ADAPTIVE_RENDER_STRIDE = _env_bool("ADAPTIVE_RENDER_STRIDE", True)
+CATCHUP_RENDER_STRIDE = max(
+    RENDER_STRIDE, int(os.getenv("CATCHUP_RENDER_STRIDE", "3"))
+)
+CATCHUP_BUFFER_SECONDS = max(
+    0.0, float(os.getenv("CATCHUP_BUFFER_SECONDS", "0.75"))
+)
 STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
 WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
 TTS_STARTUP_WAIT_SECONDS = max(
@@ -611,6 +618,7 @@ def _ensure_joyvasa_pipeline() -> None:
 
 def _render_animation_direct(
     wav_path: Path,
+    render_stride: int | None = None,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
 
@@ -622,6 +630,7 @@ def _render_animation_direct(
     if pipeline.is_source_video:
         raise RuntimeError("Direct-memory rendering currently requires a source image")
 
+    selected_stride = max(1, render_stride or RENDER_STRIDE)
     render_started = time.perf_counter()
     _ensure_joyvasa_pipeline()
     assert pipeline.joyvasa_pipe is not None
@@ -631,14 +640,14 @@ def _render_animation_direct(
     motion_seconds = time.perf_counter() - motion_started
 
     source_fps = float(motion_info.get("output_fps") or 25.0)
-    playback_fps = source_fps / RENDER_STRIDE
+    playback_fps = source_fps / selected_stride
     motion_list = motion_info["motion"]
     eyes_list = motion_info.get("c_eyes_lst", motion_info.get("c_d_eyes_lst"))
     lips_list = motion_info.get("c_lip_lst", motion_info.get("c_d_lip_lst"))
 
     frame_loop_started = time.perf_counter()
     frames: list[np.ndarray] = []
-    for frame_index in range(0, len(motion_list), RENDER_STRIDE):
+    for frame_index in range(0, len(motion_list), selected_stride):
         motion = motion_list[frame_index]
         eyes = (
             eyes_list[frame_index]
@@ -674,7 +683,7 @@ def _render_animation_direct(
         "decode_ms": 0,
         "total_ms": round(total_seconds * 1000),
         "pipeline_reported_ms": 0,
-        "render_stride": RENDER_STRIDE,
+        "render_stride": selected_stride,
         "motion_frames": len(motion_list),
         "frames": len(frames),
         "source_fps": round(source_fps, 3),
@@ -689,10 +698,27 @@ def _render_animation_direct(
 def _render_animation(
     wav_path: Path,
     output_dir: Path,
+    render_stride: int | None = None,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK:
-        return _render_animation_direct(wav_path)
+        return _render_animation_direct(wav_path, render_stride)
     return _render_animation_legacy(wav_path, output_dir)
+
+
+def _select_render_stride(
+    phrase_index: int,
+    buffered_seconds: float,
+) -> tuple[int, str]:
+    """Select temporal quality from the buffer state at render start."""
+    if not DIRECT_MEMORY_RENDER or AVATAR_PASTE_BACK:
+        return 1, "legacy-backend"
+    if not ADAPTIVE_RENDER_STRIDE or CATCHUP_RENDER_STRIDE == RENDER_STRIDE:
+        return RENDER_STRIDE, "fixed"
+    if phrase_index == 1:
+        return RENDER_STRIDE, "first-phrase-quality"
+    if buffered_seconds < CATCHUP_BUFFER_SECONDS:
+        return CATCHUP_RENDER_STRIDE, "low-buffer-catchup"
+    return RENDER_STRIDE, "buffer-healthy"
 
 
 async def _prepare_phrase_audio(
@@ -840,9 +866,23 @@ async def _create_clip(
                                 prefetched=True,
                             )
                         )
+                    buffer_before_render = playback.buffered_seconds
+                    selected_stride, stride_reason = _select_render_stride(
+                        index,
+                        buffer_before_render,
+                    )
                     started = time.perf_counter()
                     frames, fps, render_detail = await asyncio.to_thread(
-                        _render_animation, wav_path, chunk_dir
+                        _render_animation,
+                        wav_path,
+                        chunk_dir,
+                        selected_stride,
+                    )
+                    render_detail["adaptive_stride"] = ADAPTIVE_RENDER_STRIDE
+                    render_detail["stride_reason"] = stride_reason
+                    render_detail["buffer_before_render_seconds"] = round(
+                        buffer_before_render,
+                        3,
                     )
                     render_seconds = time.perf_counter() - started
                     total_render += render_seconds
@@ -862,7 +902,8 @@ async def _create_clip(
                     LOG.info(
                         "Phrase %d/%d timings: voice=%s cfg=%.2f tts=%.3fs tts_wait=%dms "
                         "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
-                        "render=%.3fs backend=%s stride=%d motion=%dms "
+                        "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
+                        "buffer_before=%.3fs motion=%dms "
                         "frame_loop=%dms effective_fps=%.2f pipeline=%dms "
                         "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
                         "buffer=%.3fs underrun=%.0fms",
@@ -879,6 +920,9 @@ async def _create_clip(
                         render_seconds,
                         render_detail["backend"],
                         render_detail["render_stride"],
+                        render_detail["adaptive_stride"],
+                        render_detail["stride_reason"],
+                        render_detail["buffer_before_render_seconds"],
                         render_detail["motion_ms"],
                         render_detail["frame_loop_ms"],
                         render_detail["effective_fps"],
@@ -912,6 +956,11 @@ async def _create_clip(
                         render_ms=round(render_seconds * 1000),
                         render_backend=render_detail["backend"],
                         render_stride=render_detail["render_stride"],
+                        render_adaptive_stride=render_detail["adaptive_stride"],
+                        render_stride_reason=render_detail["stride_reason"],
+                        render_buffer_before_seconds=render_detail[
+                            "buffer_before_render_seconds"
+                        ],
                         render_motion_ms=render_detail["motion_ms"],
                         render_frame_loop_ms=render_detail["frame_loop_ms"],
                         render_effective_fps=render_detail["effective_fps"],
@@ -1146,6 +1195,9 @@ async def health() -> JSONResponse:
             else "legacy-mp4"
         ),
         "configured_render_stride": RENDER_STRIDE,
+        "adaptive_render_stride": ADAPTIVE_RENDER_STRIDE,
+        "catchup_render_stride": CATCHUP_RENDER_STRIDE,
+        "catchup_buffer_seconds": CATCHUP_BUFFER_SECONDS,
         "render_stride": (
             RENDER_STRIDE
             if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK

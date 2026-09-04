@@ -398,6 +398,13 @@ def _aggregate_run(result: dict[str, Any]) -> dict[str, Any]:
     first_byte_values = [
         float(item.get("tts_first_byte_ms", 0)) for item in metrics
     ]
+    stride_counts: dict[str, int] = {}
+    stride_reason_counts: dict[str, int] = {}
+    for item in metrics:
+        stride = str(item.get("render_stride", "unknown"))
+        reason = str(item.get("render_stride_reason", "fixed"))
+        stride_counts[stride] = stride_counts.get(stride, 0) + 1
+        stride_reason_counts[reason] = stride_reason_counts.get(reason, 0) + 1
     return {
         "mode": result["mode"],
         "run_index": result["run_index"],
@@ -417,6 +424,8 @@ def _aggregate_run(result: dict[str, Any]) -> dict[str, Any]:
         "neural_fps": (
             round(frames / (frame_loop_ms / 1000), 3) if frame_loop_ms else None
         ),
+        "render_stride_counts": stride_counts,
+        "render_stride_reason_counts": stride_reason_counts,
     }
 
 
@@ -494,6 +503,10 @@ def _write_csv(path: Path, runs: list[dict[str, Any]]) -> None:
         "tts_ms",
         "tts_first_byte_ms",
         "render_ms",
+        "render_stride",
+        "render_adaptive_stride",
+        "render_stride_reason",
+        "render_buffer_before_seconds",
         "render_effective_fps",
         "media_seconds",
         "underrun_ms",
@@ -521,6 +534,14 @@ def _markdown_report(payload: dict[str, Any]) -> str:
         "",
         f"Measured repeats per mode: `{payload['benchmark']['repeats']}`",
         "",
+        "Render policy: base stride `{base}`, adaptive `{adaptive}`, catch-up "
+        "stride `{catchup}` below `{buffer:.2f}` buffered seconds".format(
+            base=payload["health"].get("render_stride", "unknown"),
+            adaptive=payload["health"].get("adaptive_render_stride", False),
+            catchup=payload["health"].get("catchup_render_stride", "unknown"),
+            buffer=float(payload["health"].get("catchup_buffer_seconds", 0)),
+        ),
+        "",
         "## Median results",
         "",
         "| Mode | First ready | First byte | TTS RTF | Render RTF | Neural FPS | Media | Gap | Client wall |",
@@ -547,14 +568,16 @@ def _markdown_report(payload: dict[str, Any]) -> str:
             "",
             "## Per-run totals",
             "",
-            "| Run | Mode | Warm-up | TTS | Render | Media | Gap | TTS RTF | Neural FPS |",
-            "| ---: | --- | :---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Run | Mode | Warm-up | Strides | TTS | Render | Media | Gap | TTS RTF | Neural FPS |",
+            "| ---: | --- | :---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for run in payload["summary"]["runs"]:
         lines.append(
             f"| {run['run_index']} | {run['mode']} | "
-            f"{'yes' if run['warmup'] else 'no'} | {run['tts_ms']} ms | "
+            f"{'yes' if run['warmup'] else 'no'} | "
+            f"{', '.join(f'{stride}×{count}' for stride, count in run['render_stride_counts'].items())} | "
+            f"{run['tts_ms']} ms | "
             f"{run['render_ms']} ms | {run['media_ms']} ms | {run['gap_ms']} ms | "
             f"{(run['tts_rtf'] or 0):.3f} | {(run['neural_fps'] or 0):.2f} |"
         )
@@ -594,6 +617,9 @@ def compare_results(args: argparse.Namespace) -> int:
                     "run_directory": report_path.parent.name,
                     "server_build": health.get("server_build"),
                     "render_stride": health.get("render_stride"),
+                    "adaptive_render_stride": health.get("adaptive_render_stride"),
+                    "catchup_render_stride": health.get("catchup_render_stride"),
+                    "catchup_buffer_seconds": health.get("catchup_buffer_seconds"),
                     "tts_prefetch": health.get("tts_prefetch"),
                     "phrase_first_target_chars": health.get(
                         "phrase_first_target_chars"
