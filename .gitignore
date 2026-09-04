@@ -35,6 +35,9 @@ datasets/
 *.h5
 *.hdf5
 
+# Benchmark test result 
+results/benchmarks/
+
 # Jupyter Notebooks
 .ipynb_checkpoints
 
