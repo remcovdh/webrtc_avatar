@@ -10,7 +10,7 @@ profiles="${BREEZE_BENCHMARK_PROFILES:-eager backbone-decode depth-decoder codec
 include_fast_all="${BREEZE_BENCHMARK_INCLUDE_FAST_ALL:-0}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 output_root="results/breeze-benchmarks/${timestamp}"
-mkdir -p "${output_root}"
+mkdir -p "${output_root}/audio"
 
 declare -A flags=(
   [eager]=""
@@ -19,6 +19,9 @@ declare -A flags=(
   [codec]="--fast-codec"
   [backbone-prefill]="--fast-backbone-prefill"
   [text-encoder]="--fast-text-encoder"
+  [depth-codec]="--fast-depth-decoder --fast-codec"
+  [depth-codec-backbone]="--fast-depth-decoder --fast-codec --fast-backbone-decode"
+  # Compatibility alias retained from v2G.
   [decode-depth-codec]="--fast-backbone-decode --fast-depth-decoder --fast-codec"
   [fast-all]="--fast-all"
 )
@@ -65,6 +68,7 @@ for profile in ${profiles}; do
       --fast-args="${flags[${profile}]}" \
       --warmups "${warmups}" \
       --repeats "${repeats}" \
+      --capture-wav "/workspace/results/${profile}.wav" \
       --output "/workspace/results/${profile}.json"; then
     echo "${profile}" >> "${output_root}/failed.txt"
     docker compose logs --tail=120 breeze-tts > "${output_root}/${profile}.log" 2>&1 || true
@@ -72,6 +76,7 @@ for profile in ${profiles}; do
     continue
   fi
   docker compose cp "breeze-tts:/workspace/results/${profile}.json" "${output_root}/${profile}.json"
+  docker compose cp "breeze-tts:/workspace/results/${profile}.wav" "${output_root}/audio/${profile}.wav"
 done
 
 python3 - "${output_root}" <<'PY'
@@ -80,16 +85,16 @@ root = pathlib.Path(sys.argv[1])
 rows=[]
 for path in sorted(root.glob("*.json")):
     data=json.loads(path.read_text())
-    row={"scenario":data["scenario"], "fast_args":data["fast_args"], "flash_attention":data.get("flash_attention"), **data["median"]}
+    row={"scenario":data["scenario"], "fast_args":data["fast_args"], "flash_attention":data.get("flash_attention"), "capture_wav":data.get("capture_wav"), "capture_sha256":data.get("capture_sha256"), **data["median"]}
     rows.append(row)
-fields=["scenario","fast_args","flash_attention","first_byte_ms","total_ms","media_seconds","rtf","gpu_peak_mib","gpu_min_mib","headers_ms"]
+fields=["scenario","fast_args","flash_attention","capture_wav","capture_sha256","first_byte_ms","total_ms","media_seconds","rtf","gpu_peak_mib","gpu_min_mib","headers_ms"]
 with (root/"comparison.csv").open("w", newline="") as f:
     writer=csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
 lines=["# Breeze fast-path benchmark", "", "Medians after warm-up.", "",
-       "| Profile | Fast arguments | FlashAttention | First byte | Total | Audio | RTF | Peak GPU |",
+       "| Profile | Fast arguments | Audio capture | First byte | Total | Audio | RTF | Peak GPU |",
        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"]
 for r in rows:
-    lines.append(f"| {r['scenario']} | `{r['fast_args'] or 'eager'}` | {r['flash_attention'] or 'no'} | {r['first_byte_ms']:.0f} ms | {r['total_ms']:.0f} ms | {r['media_seconds']:.2f} s | {r['rtf']:.3f} | {r['gpu_peak_mib'] or 'n/a'} MiB |")
+    lines.append(f"| {r['scenario']} | `{r['fast_args'] or 'eager'}` | [listen](audio/{r['scenario']}.wav) | {r['first_byte_ms']:.0f} ms | {r['total_ms']:.0f} ms | {r['media_seconds']:.2f} s | {r['rtf']:.3f} | {r['gpu_peak_mib'] or 'n/a'} MiB |")
 failed=root/"failed.txt"
 if failed.exists():
     lines += ["", "## Failed profiles", "", *[f"- {x}" for x in failed.read_text().splitlines()]]

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import statistics
 import subprocess
 import time
+import wave
 from pathlib import Path
 
 import httpx
@@ -54,10 +56,12 @@ async def sample_gpu(stop: asyncio.Event, samples: list[int]) -> None:
 
 
 async def synthesize(client: httpx.AsyncClient, url: str, text: str, instruction: str,
-                     cfg_scale: float, seed: int) -> dict[str, float | int | None]:
+                     cfg_scale: float, seed: int,
+                     capture_wav: Path | None = None) -> dict[str, float | int | str | None]:
     started = time.perf_counter()
     first_byte_ms = None
     size = 0
+    captured_pcm = bytearray() if capture_wav is not None else None
     samples: list[int] = []
     stop = asyncio.Event()
     sampler = asyncio.create_task(sample_gpu(stop, samples))
@@ -79,12 +83,14 @@ async def synthesize(client: httpx.AsyncClient, url: str, text: str, instruction
                 if chunk and first_byte_ms is None:
                     first_byte_ms = (time.perf_counter() - started) * 1000
                 size += len(chunk)
+                if captured_pcm is not None:
+                    captured_pcm.extend(chunk)
     finally:
         stop.set()
         await sampler
     total_ms = (time.perf_counter() - started) * 1000
     media_seconds = size / PCM_BYTES_PER_SECOND
-    return {
+    result: dict[str, float | int | str | None] = {
         "headers_ms": round(headers_ms, 3),
         "first_byte_ms": round(first_byte_ms or total_ms, 3),
         "total_ms": round(total_ms, 3),
@@ -94,6 +100,16 @@ async def synthesize(client: httpx.AsyncClient, url: str, text: str, instruction
         "gpu_peak_mib": max(samples) if samples else None,
         "gpu_min_mib": min(samples) if samples else None,
     }
+    if capture_wav is not None and captured_pcm is not None:
+        capture_wav.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(capture_wav), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24_000)
+            wav.writeframes(captured_pcm)
+        result["capture_wav"] = capture_wav.name
+        result["capture_sha256"] = hashlib.sha256(capture_wav.read_bytes()).hexdigest()
+    return result
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -103,8 +119,9 @@ async def main_async(args: argparse.Namespace) -> int:
                              args.cfg_scale, args.seed)
         runs = []
         for index in range(1, args.repeats + 1):
+            capture = Path(args.capture_wav) if args.capture_wav and index == 1 else None
             result = await synthesize(client, args.url, args.text, args.instruction,
-                                      args.cfg_scale, args.seed)
+                                      args.cfg_scale, args.seed, capture)
             result["run"] = index
             runs.append(result)
             print(json.dumps(result, sort_keys=True), flush=True)
@@ -124,6 +141,8 @@ async def main_async(args: argparse.Namespace) -> int:
         "flash_attention": flash_attention_version(),
         "warmups": args.warmups,
         "repeats": args.repeats,
+        "capture_wav": runs[0].get("capture_wav") if runs else None,
+        "capture_sha256": runs[0].get("capture_sha256") if runs else None,
         "runs": runs,
         "median": {key: median(key) for key in (
             "headers_ms", "first_byte_ms", "total_ms", "media_seconds", "rtf",
@@ -141,6 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--fast-args", default="")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--capture-wav")
     parser.add_argument("--url", default="http://127.0.0.1:7860")
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=3)

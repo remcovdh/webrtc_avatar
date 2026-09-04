@@ -37,6 +37,7 @@ datasets/
 
 # Benchmark test result 
 results/benchmarks/
+results/breeze-benchmarks/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

@@ -1,8 +1,45 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2g1-benchmark-argument-fix`
+Current build: `neural-avatar-v2h-breeze-combinations-audio`
 
-> v2G.1 fixes fast-profile names beginning with `--` being misread by the
+## v2H combination and listening test
+
+v2H adds two built-in Breeze profiles and saves the first measured response
+from every profile as a standard 24 kHz mono 16-bit WAV:
+
+| Profile | Fast arguments |
+| --- | --- |
+| `depth-codec` | `--fast-depth-decoder --fast-codec` |
+| `depth-codec-backbone` | `--fast-depth-decoder --fast-codec --fast-backbone-decode` |
+
+Run the selected comparison:
+
+```bash
+BREEZE_BENCHMARK_WARMUPS=2 \
+BREEZE_BENCHMARK_REPEATS=5 \
+BREEZE_BENCHMARK_PROFILES="eager depth-decoder depth-codec depth-codec-backbone" \
+./breeze_benchmark.sh
+```
+
+Captures are created automatically:
+
+```text
+results/breeze-benchmarks/<timestamp>/
+├── report.md
+├── comparison.csv
+├── *.json
+└── audio/
+    ├── eager.wav
+    ├── depth-decoder.wav
+    ├── depth-codec.wav
+    └── depth-codec-backbone.wav
+```
+
+Each JSON and CSV row includes the WAV SHA-256 so a listening result can be
+associated with the exact benchmark output. The files in `inputs/` are neither
+used nor modified by this Breeze fast-path benchmark.
+
+> v2G.1 fixed fast-profile names beginning with `--` being misread by the
 > benchmark client's argument parser. The Breeze CUDA graph was already being
 > captured correctly; only the measurement command failed.
 

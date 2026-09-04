@@ -1,4 +1,12 @@
-# neural-avatar-v2g1-benchmark-argument-fix
+# neural-avatar-v2h-breeze-combinations-audio
+
+## v2H optimization
+
+- Adds the `depth-codec` and `depth-codec-backbone` combination profiles.
+- Captures the first measured raw PCM response as a proper WAV per profile.
+- Adds capture filename and SHA-256 to JSON and CSV output.
+- Links each WAV from the generated Markdown report.
+- Does not read, rename, overwrite, or otherwise change files under `inputs/`.
 
 ## v2G.1 correction
 
