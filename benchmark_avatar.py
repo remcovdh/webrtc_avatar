@@ -385,6 +385,9 @@ def _aggregate_run(result: dict[str, Any]) -> dict[str, Any]:
     tts_ms = sum(float(item.get("tts_ms", 0)) for item in metrics)
     render_ms = sum(float(item.get("render_ms", 0)) for item in metrics)
     gap_ms = sum(float(item.get("underrun_ms", 0)) for item in metrics)
+    video_hold_ms = sum(
+        float(item.get("video_underrun_ms", 0)) for item in metrics
+    )
     media_ms = sum(float(item.get("media_seconds", 0)) * 1000 for item in metrics)
     frame_loop_ms = sum(
         float(item.get("render_frame_loop_ms", 0)) for item in metrics
@@ -394,6 +397,11 @@ def _aggregate_run(result: dict[str, Any]) -> dict[str, Any]:
         float(item["first_ready_ms"])
         for item in metrics
         if item.get("first_ready_ms") is not None
+    ]
+    first_window_values = [
+        float(item["render_first_window_ms"])
+        for item in metrics
+        if item.get("render_first_window_ms") is not None
     ]
     first_byte_values = [
         float(item.get("tts_first_byte_ms", 0)) for item in metrics
@@ -414,8 +422,14 @@ def _aggregate_run(result: dict[str, Any]) -> dict[str, Any]:
         "tts_ms": round(tts_ms),
         "render_ms": round(render_ms),
         "gap_ms": round(gap_ms),
+        "video_hold_ms": round(video_hold_ms),
         "media_ms": round(media_ms),
         "first_ready_ms": round(first_ready_values[0]) if first_ready_values else None,
+        "first_window_median_ms": (
+            round(statistics.median(first_window_values))
+            if first_window_values
+            else None
+        ),
         "first_byte_median_ms": (
             round(statistics.median(first_byte_values)) if first_byte_values else None
         ),
@@ -443,8 +457,10 @@ def _summarize(runs: list[dict[str, Any]], modes: list[str]) -> dict[str, Any]:
         "tts_ms",
         "render_ms",
         "gap_ms",
+        "video_hold_ms",
         "media_ms",
         "first_ready_ms",
+        "first_window_median_ms",
         "first_byte_median_ms",
         "tts_rtf",
         "render_rtf",
@@ -508,8 +524,12 @@ def _write_csv(path: Path, runs: list[dict[str, Any]]) -> None:
         "render_stride_reason",
         "render_buffer_before_seconds",
         "render_effective_fps",
+        "render_first_window_ms",
+        "render_window_count",
+        "render_window_size",
         "media_seconds",
         "underrun_ms",
+        "video_underrun_ms",
         "first_ready_ms",
         "client_wall_ms",
     ]
@@ -550,22 +570,24 @@ def _markdown_report(payload: dict[str, Any]) -> str:
         "",
         "## Median results",
         "",
-        "| Mode | First ready | First byte | TTS RTF | Render RTF | Neural FPS | Media | Gap | Client wall |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | First ready | FLP first window | First byte | TTS RTF | Render RTF | Neural FPS | Media | Audio gap | Video hold | Client wall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for mode, stats in payload["summary"]["by_mode"].items():
         lines.append(
-            "| {mode} | {first:.0f} ms | {byte:.0f} ms | {tts:.3f} | "
-            "{render:.3f} | {fps:.2f} | {media:.0f} ms | {gap:.0f} ms | "
+            "| {mode} | {first:.0f} ms | {window:.0f} ms | {byte:.0f} ms | {tts:.3f} | "
+            "{render:.3f} | {fps:.2f} | {media:.0f} ms | {gap:.0f} ms | {hold:.0f} ms | "
             "{wall:.0f} ms |".format(
                 mode=mode,
                 first=stats.get("median_first_ready_ms") or 0,
+                window=stats.get("median_first_window_median_ms") or 0,
                 byte=stats.get("median_first_byte_median_ms") or 0,
                 tts=stats.get("median_tts_rtf") or 0,
                 render=stats.get("median_render_rtf") or 0,
                 fps=stats.get("median_neural_fps") or 0,
                 media=stats.get("median_media_ms") or 0,
                 gap=stats.get("median_gap_ms") or 0,
+                hold=stats.get("median_video_hold_ms") or 0,
                 wall=stats.get("median_client_wall_ms") or 0,
             )
         )
@@ -635,6 +657,9 @@ def compare_results(args: argparse.Namespace) -> int:
                     "mode": mode,
                     "measured_runs": stats.get("measured_runs"),
                     "median_first_ready_ms": stats.get("median_first_ready_ms"),
+                    "median_first_window_ms": stats.get(
+                        "median_first_window_median_ms"
+                    ),
                     "median_first_byte_ms": stats.get(
                         "median_first_byte_median_ms"
                     ),
@@ -643,6 +668,7 @@ def compare_results(args: argparse.Namespace) -> int:
                     "median_neural_fps": stats.get("median_neural_fps"),
                     "median_media_ms": stats.get("median_media_ms"),
                     "median_gap_ms": stats.get("median_gap_ms"),
+                    "median_video_hold_ms": stats.get("median_video_hold_ms"),
                     "median_client_wall_ms": stats.get("median_client_wall_ms"),
                     "benchmark_text_sha256": hashlib.sha256(
                         str(benchmark.get("text", "")).encode("utf-8")
@@ -670,25 +696,27 @@ def compare_results(args: argparse.Namespace) -> int:
         "All discovered runs are listed. Compare rows with the same benchmark-text "
         "and preset hashes.",
         "",
-        "| Date | Scenario | Mode | Runs | First ready | First byte | TTS RTF | Render RTF | Neural FPS | Media | Gap |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Date | Scenario | Mode | Runs | First ready | FLP first window | First byte | TTS RTF | Render RTF | Neural FPS | Media | Audio gap | Video hold |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            "| {date} | {scenario} | {mode} | {runs} | {ready:.0f} ms | "
+            "| {date} | {scenario} | {mode} | {runs} | {ready:.0f} ms | {window:.0f} ms | "
             "{byte:.0f} ms | {tts:.3f} | {render:.3f} | {fps:.2f} | "
-            "{media:.0f} ms | {gap:.0f} ms |".format(
+            "{media:.0f} ms | {gap:.0f} ms | {hold:.0f} ms |".format(
                 date=str(row["created_utc"] or "")[:19],
                 scenario=row["scenario"],
                 mode=row["mode"],
                 runs=row["measured_runs"] or 0,
                 ready=row["median_first_ready_ms"] or 0,
+                window=row.get("median_first_window_ms") or 0,
                 byte=row["median_first_byte_ms"] or 0,
                 tts=row["median_tts_rtf"] or 0,
                 render=row["median_render_rtf"] or 0,
                 fps=row["median_neural_fps"] or 0,
                 media=row["median_media_ms"] or 0,
                 gap=row["median_gap_ms"] or 0,
+                hold=row.get("median_video_hold_ms") or 0,
             )
         )
     lines.extend(

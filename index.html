@@ -67,8 +67,8 @@
         </div>
         <div class="timing-wrap">
           <table>
-            <thead><tr><th>Phrase</th><th>Voice</th><th>CFG</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Backend</th><th>Stride</th><th>Policy</th><th>Motion</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Gap</th></tr></thead>
-            <tbody id="timingRows"><tr><td class="empty" colspan="21">Timings appear here</td></tr></tbody>
+            <thead><tr><th>Phrase</th><th>Voice</th><th>CFG</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Backend</th><th>Stride</th><th>Policy</th><th>Motion</th><th>First window</th><th>Windows</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Audio gap</th><th>Video hold</th></tr></thead>
+            <tbody id="timingRows"><tr><td class="empty" colspan="24">Timings appear here</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -96,7 +96,7 @@
     function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
     function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
     function resetTimings() {
-      timingRows.innerHTML = '<tr><td class="empty" colspan="21">Splitting text into phrases…</td></tr>';
+      timingRows.innerHTML = '<tr><td class="empty" colspan="24">Splitting text into phrases…</td></tr>';
       timingSummary.textContent = "Waiting for first phrase";
     }
     function formatMs(value) { return `${Math.max(0, Number(value || 0))} ms`; }
@@ -116,6 +116,8 @@
         String(Math.max(1, Number(message.render_stride || 1))),
         `${message.render_stride_reason || "fixed"} @ ${Number(message.render_buffer_before_seconds || 0).toFixed(2)} s`,
         formatMs(message.render_motion_ms),
+        formatMs(message.render_first_window_ms),
+        `${Number(message.render_window_count || 0)} × ${Number(message.render_window_size || 0)}`,
         formatMs(message.render_frame_loop_ms),
         formatRate(message.render_effective_fps),
         `${Number(message.render_frames || 0)}/${Number(message.render_motion_frames || message.render_frames || 0)}`,
@@ -126,6 +128,7 @@
         `${Number(message.media_seconds || 0).toFixed(2)} s`,
         `${Number(message.buffered_seconds || 0).toFixed(2)} s`,
         formatMs(message.underrun_ms),
+        formatMs(message.video_underrun_ms),
       ];
       for (const value of values) {
         const cell = document.createElement("td");
@@ -189,7 +192,10 @@
         const renderPolicy = healthBody.adaptive_render_stride
           ? `adaptive ${healthBody.render_stride || 1}→${healthBody.catchup_render_stride || 1} below ${Number(healthBody.catchup_buffer_seconds || 0).toFixed(2)} s`
           : `fixed stride ${healthBody.render_stride || 1}`;
-        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
+        const windows = healthBody.incremental_frame_windows
+          ? `${healthBody.render_window_frames || 8}-frame windows`
+          : "phrase-batch frames";
+        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
         const config = await fetch("/client-config").then(response => response.json());
         configureVoiceModes(config);
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
@@ -221,9 +227,10 @@
           } else if (message.type === "metrics") {
             appendTiming(message);
           } else if (message.type === "playing") {
+            if (message.first_ready_ms != null) timingSummary.textContent = `First playback ready in ${formatMs(message.first_ready_ms)}`;
             setStatus(message.message || "Playing…", "good");
           } else if (message.type === "summary") {
-            timingSummary.textContent = `TTS ${formatMs(message.tts_ms)} · render ${formatMs(message.render_ms)} · total ${formatMs(message.total_ms)} · gaps ${formatMs(message.underrun_ms)}`;
+            timingSummary.textContent = `TTS ${formatMs(message.tts_ms)} · render ${formatMs(message.render_ms)} · total ${formatMs(message.total_ms)} · audio gaps ${formatMs(message.underrun_ms)} · video holds ${formatMs(message.video_underrun_ms)}`;
             setStatus(message.message || "Playback complete", "good");
           } else {
             setStatus(message.message || "Working…");

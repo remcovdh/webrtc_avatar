@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2j-neural-idle-frame"
+SERVER_BUILD = "neural-avatar-v2k-flp-frame-windows"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -107,6 +107,8 @@ TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
 DIRECT_MEMORY_RENDER = _env_bool("DIRECT_MEMORY_RENDER", True)
+INCREMENTAL_FRAME_WINDOWS = _env_bool("INCREMENTAL_FRAME_WINDOWS", True)
+RENDER_WINDOW_FRAMES = max(1, int(os.getenv("RENDER_WINDOW_FRAMES", "8")))
 RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
 ADAPTIVE_RENDER_STRIDE = _env_bool("ADAPTIVE_RENDER_STRIDE", True)
 CATCHUP_RENDER_STRIDE = max(
@@ -370,6 +372,12 @@ class PlaybackBuffer:
         self.last_video = BASE_AVATAR
         self.audio_underruns = 0
         self.video_underruns = 0
+        self._stream_fps = 0.0
+        self._stream_source_frames = 0
+        self._stream_video_emitted = 0
+        self._stream_video_target = 0
+        self._stream_media_duration = 0.0
+        self._stream_last_frame: np.ndarray | None = None
 
     @property
     def busy(self) -> bool:
@@ -413,6 +421,90 @@ class PlaybackBuffer:
         self.started = True
         return duration
 
+    def begin_phrase_stream(
+        self,
+        pcm_24k: np.ndarray,
+        fps: float,
+        expected_rendered_frames: int,
+    ) -> float:
+        """Queue phrase audio and initialise drift-free windowed video timing."""
+        if fps <= 0:
+            fps = 25.0
+        if expected_rendered_frames <= 0:
+            raise ValueError("The incremental renderer expected no video frames")
+
+        pcm_48k = np.repeat(pcm_24k.astype(np.int16, copy=False), 2)
+        audio_duration = len(pcm_48k) / AUDIO_RATE
+        video_duration = expected_rendered_frames / fps
+        duration = max(audio_duration, video_duration)
+        required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
+        padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
+        for offset in range(0, len(padded), AUDIO_SAMPLES):
+            chunk = padded[offset : offset + AUDIO_SAMPLES]
+            if len(chunk) < AUDIO_SAMPLES:
+                chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
+            self.audio.append(chunk.reshape(1, -1))
+
+        self._stream_fps = fps
+        self._stream_source_frames = 0
+        self._stream_video_emitted = 0
+        self._stream_video_target = max(1, math.ceil(duration * VIDEO_FPS))
+        self._stream_media_duration = duration
+        self._stream_last_frame = None
+        return duration
+
+    def append_video_window(self, frames: list[np.ndarray]) -> None:
+        """Append rendered frames while preserving resampling phase per phrase."""
+        if not frames:
+            return
+        if self._stream_fps <= 0 or self._stream_video_target <= 0:
+            raise RuntimeError("Phrase stream was not initialised")
+
+        source_start = self._stream_source_frames
+        source_end = source_start + len(frames)
+        desired = min(
+            self._stream_video_target,
+            math.ceil(source_end * VIDEO_FPS / self._stream_fps),
+        )
+        for target_index in range(self._stream_video_emitted, desired):
+            source_index = min(
+                math.floor(target_index * self._stream_fps / VIDEO_FPS),
+                source_end - 1,
+            )
+            if source_index < source_start:
+                frame = self.last_video
+            else:
+                frame = frames[source_index - source_start]
+            self.video.append(frame)
+
+        self._stream_source_frames = source_end
+        self._stream_video_emitted = desired
+        self._stream_last_frame = frames[-1]
+        # Audio and the first video window become visible atomically from the
+        # event loop's perspective, so speech never starts on the idle frame.
+        self.started = True
+
+    def finish_phrase_stream(self) -> float:
+        """Pad a short video tail with its last frame and close stream state."""
+        if self._stream_video_emitted < self._stream_video_target:
+            tail_frame = self._stream_last_frame
+            if tail_frame is None:
+                raise RuntimeError("Incremental renderer produced no video frames")
+            self.video.extend(
+                tail_frame
+                for _ in range(
+                    self._stream_video_target - self._stream_video_emitted
+                )
+            )
+        duration = self._stream_media_duration
+        self._stream_fps = 0.0
+        self._stream_source_frames = 0
+        self._stream_video_emitted = 0
+        self._stream_video_target = 0
+        self._stream_media_duration = 0.0
+        self._stream_last_frame = None
+        return duration
+
     def finish(self) -> None:
         self.producing = False
 
@@ -441,6 +533,12 @@ class PlaybackBuffer:
         self.last_video = BASE_AVATAR
         self.audio_underruns = 0
         self.video_underruns = 0
+        self._stream_fps = 0.0
+        self._stream_source_frames = 0
+        self._stream_video_emitted = 0
+        self._stream_video_target = 0
+        self._stream_media_duration = 0.0
+        self._stream_last_frame = None
 
 
 class AvatarVideoTrack(VideoStreamTrack):
@@ -628,6 +726,7 @@ def _render_animation_direct(
     wav_path: Path,
     render_stride: int | None = None,
     reset_motion_reference: bool = True,
+    window_callback: Any | None = None,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
 
@@ -656,6 +755,12 @@ def _render_animation_direct(
 
     frame_loop_started = time.perf_counter()
     frames: list[np.ndarray] = []
+    window: list[np.ndarray] = []
+    window_index = 0
+    window_started = time.perf_counter()
+    window_times_ms: list[int] = []
+    rendered_count = 0
+    expected_rendered_frames = math.ceil(len(motion_list) / selected_stride)
     for frame_index in range(0, len(motion_list), selected_stride):
         motion = motion_list[frame_index]
         eyes = (
@@ -681,8 +786,42 @@ def _render_animation_direct(
         if out_crop is None:
             LOG.warning("Direct renderer returned no face for frame %d", frame_index)
             continue
-        frames.append(
-            _letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
+        frame = _letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
+        rendered_count += 1
+        if window_callback is None:
+            frames.append(frame)
+        else:
+            window.append(frame)
+            if len(window) >= RENDER_WINDOW_FRAMES:
+                window_index += 1
+                window_ms = round((time.perf_counter() - window_started) * 1000)
+                window_times_ms.append(window_ms)
+                window_callback(
+                    window,
+                    playback_fps,
+                    {
+                        "index": window_index,
+                        "render_ms": window_ms,
+                        "expected_rendered_frames": expected_rendered_frames,
+                        "motion_frames": len(motion_list),
+                    },
+                )
+                window = []
+                window_started = time.perf_counter()
+
+    if window_callback is not None and window:
+        window_index += 1
+        window_ms = round((time.perf_counter() - window_started) * 1000)
+        window_times_ms.append(window_ms)
+        window_callback(
+            window,
+            playback_fps,
+            {
+                "index": window_index,
+                "render_ms": window_ms,
+                "expected_rendered_frames": expected_rendered_frames,
+                "motion_frames": len(motion_list),
+            },
         )
 
     frame_loop_seconds = time.perf_counter() - frame_loop_started
@@ -697,16 +836,25 @@ def _render_animation_direct(
         "pipeline_reported_ms": 0,
         "render_stride": selected_stride,
         "motion_frames": len(motion_list),
-        "frames": len(frames),
+        "frames": rendered_count,
         "source_fps": round(source_fps, 3),
         "playback_fps": round(playback_fps, 3),
         "effective_fps": round(
-            len(frames) / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
+            rendered_count / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
             3,
         ),
         "motion_reference_reset": reset_motion_reference,
         "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
         "relative_motion": AVATAR_RELATIVE_MOTION,
+        "incremental_windows": window_callback is not None,
+        "window_size": RENDER_WINDOW_FRAMES if window_callback is not None else 0,
+        "window_count": window_index,
+        "window_max_ms": max(window_times_ms, default=0),
+        "window_mean_ms": round(
+            sum(window_times_ms) / len(window_times_ms)
+            if window_times_ms
+            else 0
+        ),
     }
 
 
@@ -715,12 +863,14 @@ def _render_animation(
     output_dir: Path,
     render_stride: int | None = None,
     reset_motion_reference: bool = True,
+    window_callback: Any | None = None,
 ) -> tuple[list[np.ndarray], float, dict[str, Any]]:
     if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK:
         return _render_animation_direct(
             wav_path,
             render_stride,
             reset_motion_reference,
+            window_callback,
         )
     return _render_animation_legacy(wav_path, output_dir)
 
@@ -739,6 +889,104 @@ def _select_render_stride(
     if buffered_seconds < CATCHUP_BUFFER_SECONDS:
         return CATCHUP_RENDER_STRIDE, "low-buffer-catchup"
     return RENDER_STRIDE, "buffer-healthy"
+
+
+async def _render_phrase_in_windows(
+    wav_path: Path,
+    chunk_dir: Path,
+    selected_stride: int,
+    reset_motion_reference: bool,
+    pcm: np.ndarray,
+    playback: PlaybackBuffer,
+    channel: Any,
+    phrase_index: int,
+    phrase_count: int,
+    request_started: float,
+) -> tuple[float, dict[str, Any], int]:
+    """Render on a worker thread and publish completed windows on the event loop."""
+    loop = asyncio.get_running_loop()
+    windows: asyncio.Queue[tuple[list[np.ndarray], float, dict[str, Any]]] = (
+        asyncio.Queue()
+    )
+    render_started = time.perf_counter()
+
+    def publish_window(
+        frames: list[np.ndarray],
+        fps: float,
+        detail: dict[str, Any],
+    ) -> None:
+        # Block the worker only until ownership of this small window has moved
+        # to the event loop. GPU rendering resumes while WebRTC consumes it.
+        asyncio.run_coroutine_threadsafe(
+            windows.put((frames, fps, detail)),
+            loop,
+        ).result()
+
+    render_task = asyncio.create_task(
+        asyncio.to_thread(
+            _render_animation,
+            wav_path,
+            chunk_dir,
+            selected_stride,
+            reset_motion_reference,
+            publish_window,
+        )
+    )
+    media_duration: float | None = None
+    first_window_ms: int | None = None
+    published_windows = 0
+
+    try:
+        while not render_task.done() or not windows.empty():
+            try:
+                frames, fps, window_detail = await asyncio.wait_for(
+                    windows.get(),
+                    timeout=0.05,
+                )
+            except TimeoutError:
+                continue
+
+            if media_duration is None:
+                media_duration = playback.begin_phrase_stream(
+                    pcm,
+                    fps,
+                    window_detail["expected_rendered_frames"],
+                )
+                first_window_ms = round(
+                    (time.perf_counter() - render_started) * 1000
+                )
+                playback.append_video_window(frames)
+                published_windows += 1
+                await _send_event(
+                    channel,
+                    "playing",
+                    message=(
+                        f"Playing phrase {phrase_index}/{phrase_count} after "
+                        f"the first {len(frames)}-frame window…"
+                    ),
+                    duration=round(media_duration, 3),
+                    first_window_ms=first_window_ms,
+                    first_ready_ms=round(
+                        (time.perf_counter() - request_started) * 1000
+                    ),
+                )
+            else:
+                playback.append_video_window(frames)
+                published_windows += 1
+
+        _unused_frames, _fps, render_detail = await render_task
+    except Exception:
+        if not render_task.done():
+            render_task.cancel()
+        await asyncio.gather(render_task, return_exceptions=True)
+        raise
+
+    if media_duration is None or first_window_ms is None or published_windows == 0:
+        raise RuntimeError("Incremental FLP rendering returned no frame windows")
+    playback.finish_phrase_stream()
+    render_detail["first_window_ms"] = first_window_ms
+    render_detail["published_windows"] = published_windows
+    return media_duration, render_detail, first_window_ms
 
 
 async def _prepare_phrase_audio(
@@ -892,13 +1140,46 @@ async def _create_clip(
                         buffer_before_render,
                     )
                     started = time.perf_counter()
-                    frames, fps, render_detail = await asyncio.to_thread(
-                        _render_animation,
-                        wav_path,
-                        chunk_dir,
-                        selected_stride,
-                        index == 1 or not PERSISTENT_PHRASE_MOTION,
+                    incremental = (
+                        INCREMENTAL_FRAME_WINDOWS
+                        and DIRECT_MEMORY_RENDER
+                        and not AVATAR_PASTE_BACK
                     )
+                    if incremental:
+                        media_duration, render_detail, first_window_ms = (
+                            await _render_phrase_in_windows(
+                                wav_path,
+                                chunk_dir,
+                                selected_stride,
+                                index == 1 or not PERSISTENT_PHRASE_MOTION,
+                                pcm,
+                                playback,
+                                channel,
+                                index,
+                                len(phrases),
+                                request_started,
+                            )
+                        )
+                        first_ready_ms = (
+                            round((started - request_started) * 1000)
+                            + first_window_ms
+                            if index == 1
+                            else None
+                        )
+                    else:
+                        frames, fps, render_detail = await asyncio.to_thread(
+                            _render_animation,
+                            wav_path,
+                            chunk_dir,
+                            selected_stride,
+                            index == 1 or not PERSISTENT_PHRASE_MOTION,
+                        )
+                        media_duration = playback.append(frames, fps, pcm)
+                        first_ready_ms = (
+                            round((time.perf_counter() - request_started) * 1000)
+                            if index == 1
+                            else None
+                        )
                     render_detail["adaptive_stride"] = ADAPTIVE_RENDER_STRIDE
                     render_detail["stride_reason"] = stride_reason
                     render_detail["buffer_before_render_seconds"] = round(
@@ -907,12 +1188,6 @@ async def _create_clip(
                     )
                     render_seconds = time.perf_counter() - started
                     total_render += render_seconds
-                    media_duration = playback.append(frames, fps, pcm)
-                    first_ready_ms = (
-                        round((time.perf_counter() - request_started) * 1000)
-                        if index == 1
-                        else None
-                    )
                     underrun_ms = (
                         playback.audio_underruns - underruns_before
                     ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
@@ -926,7 +1201,8 @@ async def _create_clip(
                         "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
                         "buffer_before=%.3fs motion=%dms "
                         "motion_reference_reset=%s persistent_motion=%s "
-                        "frame_loop=%dms effective_fps=%.2f pipeline=%dms "
+                        "frame_loop=%dms effective_fps=%.2f windows=%d first_window=%dms "
+                        "pipeline=%dms "
                         "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
                         "buffer=%.3fs underrun=%.0fms",
                         index,
@@ -950,6 +1226,8 @@ async def _create_clip(
                         render_detail.get("persistent_phrase_motion", False),
                         render_detail["frame_loop_ms"],
                         render_detail["effective_fps"],
+                        render_detail.get("window_count", 0),
+                        render_detail.get("first_window_ms", 0),
                         render_detail["pipeline_ms"],
                         render_detail["decode_ms"],
                         render_detail["frames"],
@@ -994,6 +1272,20 @@ async def _create_clip(
                         ),
                         render_frame_loop_ms=render_detail["frame_loop_ms"],
                         render_effective_fps=render_detail["effective_fps"],
+                        render_incremental_windows=render_detail.get(
+                            "incremental_windows", False
+                        ),
+                        render_window_size=render_detail.get("window_size", 0),
+                        render_window_count=render_detail.get("window_count", 0),
+                        render_first_window_ms=render_detail.get(
+                            "first_window_ms", 0
+                        ),
+                        render_window_mean_ms=render_detail.get(
+                            "window_mean_ms", 0
+                        ),
+                        render_window_max_ms=render_detail.get(
+                            "window_max_ms", 0
+                        ),
                         render_pipeline_ms=render_detail["pipeline_ms"],
                         render_decode_ms=render_detail["decode_ms"],
                         render_pipeline_reported_ms=render_detail[
@@ -1010,7 +1302,7 @@ async def _create_clip(
                         first_ready_ms=first_ready_ms,
                     )
 
-                    if index == 1:
+                    if index == 1 and not incremental:
                         await _send_event(
                             channel,
                             "playing",
@@ -1042,6 +1334,9 @@ async def _create_clip(
             total_ms=round(total_seconds * 1000),
             underrun_ms=round(
                 playback.audio_underruns * AUDIO_SAMPLES / AUDIO_RATE * 1000
+            ),
+            video_underrun_ms=round(
+                playback.video_underruns / VIDEO_FPS * 1000
             ),
         )
         await _send_event(channel, "ready", message="Ready")
@@ -1242,6 +1537,8 @@ async def health() -> JSONResponse:
         "cuda_provider": "CUDAExecutionProvider" in providers,
         "paste_back": AVATAR_PASTE_BACK,
         "direct_memory_render": DIRECT_MEMORY_RENDER,
+        "incremental_frame_windows": INCREMENTAL_FRAME_WINDOWS,
+        "render_window_frames": RENDER_WINDOW_FRAMES,
         "render_backend": (
             "direct-memory"
             if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK

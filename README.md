@@ -1,6 +1,44 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2j-neural-idle-frame`
+Current build: `neural-avatar-v2k-flp-frame-windows`
+
+## v2K incremental FLP frame windows
+
+v2K keeps FasterLivePortrait and JoyVASA, but no longer waits for the complete
+FLP frame loop before exposing a phrase to WebRTC. After JoyVASA creates the
+phrase motion, FLP renders eight output frames at a time. Each completed window
+is appended immediately while the worker continues rendering the next window.
+
+Audio is queued together with the first video window. Video conversion to the
+30 FPS WebRTC timeline retains a cumulative resampling position across windows,
+so rounding each window independently cannot introduce duration drift. The last
+rendered frame is held only when the audio is longer than the generated motion.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `AVATAR_INCREMENTAL_FRAME_WINDOWS` | `true` | Enable v2K incremental delivery. Set `false` to restore v2J phrase-batch delivery. |
+| `AVATAR_RENDER_WINDOW_FRAMES` | `8` | Number of rendered FLP frames published per window. At stride 2 this is approximately 0.64 seconds of playback. |
+
+The browser timing table adds `First window`, `Windows`, and `Video hold`.
+`Audio gap` means missing audio; `Video hold` means WebRTC temporarily repeated
+the last available frame while waiting for the next window. `/health` reports
+`incremental_frame_windows` and `render_window_frames`; per-phrase events add
+`render_first_window_ms`, `render_window_count`, `render_window_mean_ms`, and
+`render_window_max_ms`.
+
+Use the same comparison text as v2J. The main success criterion is not lower
+total render time; it is earlier first playback and fewer audio/video underruns
+while subsequent windows render. Start with eight frames. If the GPU is stable,
+test six and four in separate repeated runs:
+
+```bash
+AVATAR_RENDER_WINDOW_FRAMES=6 docker compose up -d --force-recreate webrtc-avatar
+```
+
+Smaller windows reduce first-window latency but also reduce protection against
+short GPU stalls. JoyVASA still consumes a completed phrase WAV, so TTS and
+motion latency remain ahead of the first FLP window. Windowed audio-to-motion is
+a later step; Ditto is still a separate future renderer.
 
 ## v2J neural idle frame
 
@@ -571,6 +609,8 @@ STARTUP_WARMUP: "false"
 | --- | --- | --- |
 | `DIRECT_MEMORY_RENDER` | `true` | Uses JoyVASA motion and FasterLivePortrait crop frames directly in memory. |
 | `AVATAR_PASTE_BACK` | `false` | Required for the v2B direct path; avoids the unstable GPU paste-back operation. |
+| `INCREMENTAL_FRAME_WINDOWS` | `true` | Publishes completed FLP windows while the rest of the phrase continues rendering. |
+| `RENDER_WINDOW_FRAMES` | `8` | Rendered frames per published window. |
 | `RENDER_STRIDE` | `2` | Base stride used for the first phrase and while the buffer is healthy. |
 | `ADAPTIVE_RENDER_STRIDE` | `true` | Enables buffer-aware selection between base and catch-up stride. |
 | `CATCHUP_RENDER_STRIDE` | `3` | Lower-cost stride selected while the buffer is below its threshold. |
@@ -584,9 +624,9 @@ The direct backend removes these per-phrase operations:
 4. reopening and decoding the completed selected MP4.
 
 It does not change JoyVASA motion, FasterLivePortrait frame inference, output
-resolution, audio format or WebRTC timing. It also does not yet append each
-frame while inference is running; a phrase becomes playable after its entire
-frame loop completes.
+resolution, audio format or WebRTC timing. v2K publishes groups of rendered
+frames while inference continues; it does not yet generate JoyVASA motion from
+partial audio.
 
 The v2F policy always renders phrase 1 at the base stride for initial visual
 quality. Before rendering every later phrase, it samples the synchronized
@@ -758,6 +798,8 @@ available in `server.py` or `entrypoint.sh`.
 | `FLP_CONFIG_PATH` | `/workspace/FasterLivePortrait/configs/onnx_infer.yaml` | FasterLivePortrait ONNX configuration. |
 | `RESULTS_ROOT` | `/workspace/results` | Temporary request output. Each phrase gets its own subdirectory. |
 | `DIRECT_MEMORY_RENDER` | `true` | Selects the v2B in-memory renderer; `false` selects the v2A.1 legacy MP4 path. |
+| `INCREMENTAL_FRAME_WINDOWS` | `true` | Enables v2K frame-window publication; `false` restores v2J phrase batches. |
+| `RENDER_WINDOW_FRAMES` | `8` | FLP output frames in each published window. |
 | `RENDER_STRIDE` | `2` | Base neural-frame decimation used by direct memory. |
 | `ADAPTIVE_RENDER_STRIDE` | `true` | Enables the v2F buffer-aware render policy. |
 | `CATCHUP_RENDER_STRIDE` | `3` | Stride used when adaptive catch-up is selected. Never lower than the base stride. |
@@ -765,6 +807,8 @@ available in `server.py` or `entrypoint.sh`.
 | `TTS_PREFETCH` | `false` | Rejected shared-GPU overlap experiment. `true` restores v2C-B for diagnostics. |
 | `STARTUP_WARMUP` | `true` | Moves lazy model initialization into container startup. |
 | `WARMUP_TEXT` | `Hello.` | Disposable phrase used by startup warm-up. |
+| `USE_NEURAL_IDLE_FRAME` | `true` | Reuses the selected warm-up frame as the visible idle image. |
+| `WARMUP_IDLE_FRAME_INDEX` | `0` | Warm-up output frame selected for the idle image. |
 | `TTS_STARTUP_WAIT_SECONDS` | `300` | Readiness timeout used before startup warm-up. |
 | `TTS_STARTUP_POLL_SECONDS` | `2` | Readiness polling interval. |
 | `BREEZE_TTS_URL` | `http://127.0.0.1:7860` | Breeze speech API used by the avatar server. |

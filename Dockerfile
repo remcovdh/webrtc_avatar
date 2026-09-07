@@ -118,11 +118,11 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html benchmark_avatar.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py /workspace/FasterLivePortrait/
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
-    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py
+    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py
 
 EXPOSE 8000
 ENTRYPOINT ["/workspace/entrypoint.sh"]

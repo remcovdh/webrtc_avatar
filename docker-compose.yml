@@ -47,7 +47,7 @@ services:
       timeout: 5s
       retries: 60
       start_period: 120s
-    restart: unless-stopped
+    restart: "no"
 
   webrtc-avatar:
     build: *avatar-build
@@ -70,6 +70,12 @@ services:
       # v2B bypasses FLP's temporary pickle, two MP4 files, two FFmpeg muxes
       # and the final OpenCV decode. Set false for an immediate v2A.1 rollback.
       DIRECT_MEMORY_RENDER: "true"
+      # v2K publishes each completed FLP frame window immediately instead of
+      # waiting for the complete phrase frame loop. Set false for v2J behavior.
+      INCREMENTAL_FRAME_WINDOWS: "${AVATAR_INCREMENTAL_FRAME_WINDOWS:-true}"
+      # Eight rendered frames represent about 0.64 s at stride 2. Smaller
+      # windows start sooner but provide less protection against GPU jitter.
+      RENDER_WINDOW_FRAMES: "${AVATAR_RENDER_WINDOW_FRAMES:-8}"
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
       RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-2}"
@@ -91,7 +97,7 @@ services:
       #   design           = reference-free voice design with CFG 4
       #   preset-clone     = fixed reference identity with CFG 1
       #   preset-direction = fixed identity plus this direction with CFG 4
-      BREEZE_DEFAULT_VOICE_MODE: "design"
+      BREEZE_DEFAULT_VOICE_MODE: "preset-clone"
       BREEZE_VOICE_INSTRUCTION: "A warm, clear, natural voice with a calm conversational delivery."
       BREEZE_DESIGN_CFG_SCALE: "4"
       BREEZE_PRESET_CLONE_CFG_SCALE: "1"
@@ -141,7 +147,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 180s
-    restart: unless-stopped
+    restart: "no"
 
   # Invoked by benchmark.sh only. It uses the avatar image for httpx and WAV
   # tooling, writes the fixed Breeze-generated preset into ./inputs, and exits.
