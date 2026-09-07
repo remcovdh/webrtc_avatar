@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2k-flp-frame-windows"
+SERVER_BUILD = "neural-avatar-v2l1-configurable-tts-build-fix"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -69,7 +69,17 @@ CONFIG_PATH = Path(
     )
 )
 RESULTS_ROOT = Path(os.getenv("RESULTS_ROOT", "/workspace/results"))
-TTS_URL = os.getenv("BREEZE_TTS_URL", "http://127.0.0.1:7860").rstrip("/")
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "chatterbox").strip().lower()
+if TTS_PROVIDER not in {"breeze", "chatterbox"}:
+    raise ValueError("TTS_PROVIDER must be breeze or chatterbox")
+TTS_URL = os.getenv(
+    "TTS_URL",
+    os.getenv("BREEZE_TTS_URL", "http://127.0.0.1:7860"),
+).rstrip("/")
+TTS_HEALTH_PATH = os.getenv(
+    "TTS_HEALTH_PATH",
+    "/health" if TTS_PROVIDER == "chatterbox" else "/docs",
+)
 TTS_INSTRUCTION = os.getenv(
     "BREEZE_VOICE_INSTRUCTION",
     "A warm, clear, natural voice with a calm conversational delivery.",
@@ -101,7 +111,8 @@ TTS_PRESET_TRANSCRIPT_FILE = Path(
     )
 )
 TTS_DEFAULT_VOICE_MODE = os.getenv(
-    "BREEZE_DEFAULT_VOICE_MODE", "design"
+    "TTS_DEFAULT_VOICE_MODE",
+    os.getenv("BREEZE_DEFAULT_VOICE_MODE", "preset-clone"),
 ).strip().lower()
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
@@ -162,6 +173,11 @@ VOICE_MODES = {
     VOICE_MODE_PRESET_CLONE,
     VOICE_MODE_PRESET_DIRECTION,
 }
+SUPPORTED_VOICE_MODES = (
+    {VOICE_MODE_DESIGN, VOICE_MODE_PRESET_CLONE}
+    if TTS_PROVIDER == "chatterbox"
+    else VOICE_MODES
+)
 
 
 @dataclass(frozen=True)
@@ -187,7 +203,7 @@ def _preset_configuration() -> tuple[bool, str, str]:
     transcript = _load_preset_transcript()
     if not TTS_PRESET_AUDIO_PATH.is_file():
         return False, transcript, f"Missing {TTS_PRESET_AUDIO_PATH}"
-    if not transcript:
+    if TTS_PROVIDER == "breeze" and not transcript:
         return (
             False,
             transcript,
@@ -207,10 +223,10 @@ def _resolve_voice_request(mode: str, instruction: str) -> VoiceRequest:
         "direction": VOICE_MODE_PRESET_DIRECTION,
     }
     normalized = aliases.get(normalized, normalized)
-    if normalized not in VOICE_MODES:
+    if normalized not in SUPPORTED_VOICE_MODES:
         raise ValueError(
-            f"Unknown voice mode {normalized!r}; choose design, "
-            "preset-clone or preset-direction."
+            f"Voice mode {normalized!r} is unavailable for {TTS_PROVIDER}; "
+            f"choose {', '.join(sorted(SUPPORTED_VOICE_MODES))}."
         )
 
     requested_instruction = instruction.strip() or TTS_INSTRUCTION
@@ -224,8 +240,12 @@ def _resolve_voice_request(mode: str, instruction: str) -> VoiceRequest:
     configured, transcript, problem = _preset_configuration()
     if not configured:
         raise ValueError(
-            f"Preset voice is not configured: {problem}. Add a clean WAV and "
-            "its exact transcript, then recreate the avatar service."
+            f"Preset voice is not configured: {problem}. Add a clean WAV "
+            + (
+                "and its exact transcript, then recreate the avatar service."
+                if TTS_PROVIDER == "breeze"
+                else "then recreate the avatar service."
+            )
         )
 
     if normalized == VOICE_MODE_PRESET_CLONE:
@@ -589,7 +609,7 @@ async def _synthesize(
     pcm_path: Path,
     wav_path: Path,
 ) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
-    """Call Breeze and report request, first-byte, transfer and finalize time."""
+    """Call the configured TTS provider and normalize its raw 24 kHz PCM."""
     request_started = time.perf_counter()
     form = {
         "text": (None, text),
@@ -622,7 +642,7 @@ async def _synthesize(
             if response.is_error:
                 detail = (await response.aread()).decode("utf-8", errors="replace")[:300]
                 raise RuntimeError(
-                    f"Breeze TTS failed ({response.status_code}): {detail}"
+                    f"{TTS_PROVIDER} TTS failed ({response.status_code}): {detail}"
                 )
             with pcm_path.open("wb") as output:
                 async for chunk in response.aiter_bytes():
@@ -635,7 +655,7 @@ async def _synthesize(
     finalize_started = time.perf_counter()
     raw = pcm_path.read_bytes()
     if len(raw) < 2:
-        raise RuntimeError("Breeze returned an empty audio stream")
+        raise RuntimeError(f"{TTS_PROVIDER} returned an empty audio stream")
     if len(raw) % 2:
         raw = raw[:-1]
     pcm = np.frombuffer(raw, dtype="<i2").copy()
@@ -657,6 +677,7 @@ async def _synthesize(
         "cfg_scale": voice.cfg_scale,
         "reference_used": voice.reference_path is not None,
         "reference_bytes": reference_bytes,
+        "provider": TTS_PROVIDER,
     }
 
 
@@ -1074,6 +1095,7 @@ async def _create_clip(
         phrases=phrases,
         voice_mode=voice.mode,
         cfg_scale=voice.cfg_scale,
+        tts_provider=TTS_PROVIDER,
     )
 
     if inference_lock.locked():
@@ -1244,6 +1266,7 @@ async def _create_clip(
                         chunks=len(phrases),
                         phrase=phrase,
                         voice_mode=voice.mode,
+                        tts_provider=TTS_PROVIDER,
                         voice_cfg_scale=voice.cfg_scale,
                         voice_reference_used=voice.reference_path is not None,
                         tts_ms=round(tts_seconds * 1000),
@@ -1355,7 +1378,7 @@ async def _create_clip(
 
 
 async def _wait_for_tts() -> float:
-    """Wait for Breeze because manual/partial Compose starts can bypass depends_on."""
+    """Wait for the configured TTS provider before startup warm-up."""
     started = time.perf_counter()
     deadline = started + TTS_STARTUP_WAIT_SECONDS
     last_problem = "no response"
@@ -1364,11 +1387,11 @@ async def _wait_for_tts() -> float:
     while True:
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"{TTS_URL}/docs")
+                response = await client.get(f"{TTS_URL}{TTS_HEALTH_PATH}")
             if response.status_code < 500:
                 waited = time.perf_counter() - started
                 if announced:
-                    LOG.info("Breeze became ready after %.3fs", waited)
+                    LOG.info("%s became ready after %.3fs", TTS_PROVIDER, waited)
                 return waited
             last_problem = f"HTTP {response.status_code}"
         except httpx.HTTPError as exc:
@@ -1377,13 +1400,14 @@ async def _wait_for_tts() -> float:
         now = time.perf_counter()
         if now >= deadline:
             raise TimeoutError(
-                f"Breeze was not ready at {TTS_URL} after "
+                f"{TTS_PROVIDER} was not ready at {TTS_URL} after "
                 f"{TTS_STARTUP_WAIT_SECONDS:.1f}s ({last_problem})"
             )
         if not announced:
             LOG.info(
-                "Waiting up to %.1fs for Breeze at %s before startup warm-up",
+                "Waiting up to %.1fs for %s at %s before startup warm-up",
                 TTS_STARTUP_WAIT_SECONDS,
+                TTS_PROVIDER,
                 TTS_URL,
             )
             announced = True
@@ -1517,7 +1541,7 @@ async def health() -> JSONResponse:
     tts_ready = False
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(f"{TTS_URL}/docs")
+            response = await client.get(f"{TTS_URL}{TTS_HEALTH_PATH}")
             tts_ready = response.status_code < 500
     except httpx.HTTPError:
         pass
@@ -1529,6 +1553,9 @@ async def health() -> JSONResponse:
         "ok": startup_error is None and tts_ready,
         "avatar_ready": startup_error is None,
         "tts_ready": tts_ready,
+        "tts_provider": TTS_PROVIDER,
+        "tts_url": TTS_URL,
+        "tts_health_path": TTS_HEALTH_PATH,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
@@ -1576,7 +1603,7 @@ async def health() -> JSONResponse:
         "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
         "relative_motion": AVATAR_RELATIVE_MOTION,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
-        "voice_modes": sorted(VOICE_MODES),
+        "voice_modes": sorted(SUPPORTED_VOICE_MODES),
         "preset_voice_configured": preset_configured,
         "preset_voice_status": preset_problem,
         "design_cfg_scale": TTS_DESIGN_CFG_SCALE,
@@ -1601,7 +1628,7 @@ async def client_config() -> JSONResponse:
         raise HTTPException(500, "ICE_SERVERS_JSON must be a JSON array")
     preset_configured, _preset_transcript, preset_problem = _preset_configuration()
     default_mode = TTS_DEFAULT_VOICE_MODE
-    if default_mode not in VOICE_MODES:
+    if default_mode not in SUPPORTED_VOICE_MODES:
         default_mode = VOICE_MODE_DESIGN
     if default_mode != VOICE_MODE_DESIGN and not preset_configured:
         default_mode = VOICE_MODE_DESIGN
@@ -1609,8 +1636,16 @@ async def client_config() -> JSONResponse:
     voice_modes = [
         {
             "id": VOICE_MODE_DESIGN,
-            "label": "Designed voice",
-            "description": "Create a voice from the direction for every request.",
+            "label": (
+                "Chatterbox built-in voice"
+                if TTS_PROVIDER == "chatterbox"
+                else "Designed voice"
+            ),
+            "description": (
+                "Use Chatterbox's built-in voice; direction text is ignored."
+                if TTS_PROVIDER == "chatterbox"
+                else "Create a voice from the direction for every request."
+            ),
             "available": True,
             "cfgScale": TTS_DESIGN_CFG_SCALE,
         },
@@ -1621,13 +1656,13 @@ async def client_config() -> JSONResponse:
             "available": preset_configured,
             "cfgScale": TTS_PRESET_CLONE_CFG_SCALE,
         },
-        {
+        *([{
             "id": VOICE_MODE_PRESET_DIRECTION,
             "label": "Preset voice + direction",
             "description": "Keep the preset identity and apply the direction.",
             "available": preset_configured,
             "cfgScale": TTS_PRESET_DIRECTION_CFG_SCALE,
-        },
+        }] if TTS_PROVIDER == "breeze" else []),
     ]
     return JSONResponse(
         {
@@ -1640,6 +1675,7 @@ async def client_config() -> JSONResponse:
             "presetVoiceFilename": (
                 TTS_PRESET_AUDIO_PATH.name if preset_configured else None
             ),
+            "ttsProvider": TTS_PROVIDER,
         }
     )
 

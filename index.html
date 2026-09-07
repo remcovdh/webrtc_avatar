@@ -195,7 +195,7 @@
         const windows = healthBody.incremental_frame_windows
           ? `${healthBody.render_window_frames || 8}-frame windows`
           : "phrase-batch frames";
-        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
+        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · TTS ${healthBody.tts_provider || "unknown"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
         const config = await fetch("/client-config").then(response => response.json());
         configureVoiceModes(config);
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });

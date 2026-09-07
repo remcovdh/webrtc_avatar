@@ -1,6 +1,99 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2k-flp-frame-windows`
+Current build: `neural-avatar-v2l1-configurable-tts-build-fix`
+
+v2L.1 fixes the Docker build-time provider test by including the Compose
+manifest in its image-local test fixture. Runtime behavior is unchanged.
+
+## v2L configurable Breeze or Chatterbox TTS
+
+v2L preserves the complete v2K avatar path and adds an isolated Chatterbox
+HTTP adapter. Compose exposes one service named `tts`; `.env` selects its
+Docker target, image and startup command. Only the chosen model is loaded.
+
+The archive defaults to Chatterbox Turbo for the local English latency test:
+
+```dotenv
+TTS_PROVIDER=chatterbox
+CHATTERBOX_VARIANT=turbo
+TTS_DEFAULT_VOICE_MODE=preset-clone
+AVATAR_TTS_PREFETCH=false
+```
+
+When upgrading from v2K, remove the old service name once so it cannot retain
+host port 7860, then build and start everything:
+
+```bash
+docker compose down --remove-orphans
+docker compose up --build
+```
+
+After the images exist, normal startup is:
+
+```bash
+docker compose up
+```
+
+To switch back to Breeze, stop the current stack, change only the provider in
+`.env`, and start again:
+
+```dotenv
+TTS_PROVIDER=breeze
+```
+
+```bash
+docker compose down
+docker compose up
+```
+
+`docker compose down` matters when changing providers because both local
+implementations bind host port 7860. Compose will select the matching image
+`neural-avatar-tts-<provider>:latest`. If that provider image has not been
+built before, use `docker compose up --build` once.
+
+Chatterbox modes in this version:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `TTS_PROVIDER` | `chatterbox` | `chatterbox` or `breeze`. |
+| `CHATTERBOX_VARIANT` | `turbo` | `turbo`, `nano`, `original`, or `multilingual-v3`. |
+| `CHATTERBOX_DEVICE` | `cuda` | Chatterbox inference device. Nano may also use `cpu`. |
+| `CHATTERBOX_LANGUAGE` | `en` | Language identifier used by Multilingual V3. |
+| `CHATTERBOX_EXAGGERATION` | `0.5` | Original-model exaggeration control. Ignored by Turbo. |
+| `CHATTERBOX_CFG_WEIGHT` | `0.5` | Original-model CFG weight. Ignored by Turbo. |
+| `TTS_URL` | `http://127.0.0.1:7860` | Generic provider endpoint; may point to another machine. |
+| `TTS_DEFAULT_VOICE_MODE` | `preset-clone` | Uses `inputs/voice-preset.wav`; Breeze also requires its `.txt`. |
+
+The adapter converts every Chatterbox result to the existing contract: mono,
+signed 16-bit, 24 kHz raw PCM. `server.py` therefore feeds identical WAV input
+to JoyVASA regardless of provider. Chatterbox reference cloning needs the WAV
+but not the transcript; retain the transcript so switching back to Breeze is
+immediate.
+
+Provider capabilities are explicit. Chatterbox exposes its built-in voice and
+preset cloning; Breeze additionally exposes natural-language designed and
+directed voices. Chatterbox does not silently reinterpret a Breeze direction.
+
+Verify the selected runtime:
+
+```bash
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+```
+
+Expected Chatterbox fields include:
+
+```json
+{
+  "server_build": "neural-avatar-v2l1-configurable-tts-build-fix",
+  "tts_provider": "chatterbox",
+  "tts_ready": true
+}
+```
+
+Keep `AVATAR_TTS_PREFETCH=false` for the first controlled comparison on one
+RTX 5080. Measure Chatterbox warm TTS RTF and FLP neural FPS first. Only then
+set it to `true`; Chatterbox is smaller than Breeze, but concurrent GPU work
+can still reduce portrait FPS.
 
 ## v2K incremental FLP frame windows
 
@@ -95,7 +188,7 @@ Both changes are reversible without rebuilding:
 BREEZE_FAST_ARGS="" \
 AVATAR_RELATIVE_MOTION=false \
 AVATAR_PERSISTENT_PHRASE_MOTION=false \
-  docker compose up -d --force-recreate breeze-tts webrtc-avatar
+  docker compose up -d --force-recreate tts webrtc-avatar
 ```
 
 The health endpoint reports `relative_motion` and
@@ -161,7 +254,7 @@ the rest of the matrix.
 Build once and run the safe individual-stage matrix:
 
 ```bash
-docker compose build breeze-tts
+TTS_PROVIDER=breeze docker compose build tts
 ./breeze_benchmark.sh
 ```
 
@@ -218,7 +311,7 @@ the normal image first. Then, if desired, attempt an `sm_120` build:
 
 ```bash
 BREEZE_INSTALL_FLASH_ATTN=1 FLASH_ATTN_CUDA_ARCHS=120 \
-  docker compose build breeze-tts
+  TTS_PROVIDER=breeze docker compose build tts
 BREEZE_BENCHMARK_PROFILES="eager backbone-decode" \
   ./breeze_benchmark.sh
 ```
@@ -546,7 +639,7 @@ image, so rebuild that target:
 
 ```bash
 docker compose build --no-cache webrtc-avatar
-docker compose up -d breeze-tts
+docker compose up -d tts
 docker compose up -d --force-recreate webrtc-avatar
 ```
 
@@ -1328,7 +1421,7 @@ recover from `ConnectError` at `127.0.0.1:7860`, start Breeze and then restart
 the avatar so warm-up runs again:
 
 ```bash
-docker compose up -d breeze-tts
+docker compose up -d tts
 docker compose restart webrtc-avatar
 ```
 
@@ -1364,7 +1457,7 @@ docker compose build --no-cache
 docker compose up
 
 # Follow only the runtime services
-docker compose logs -f breeze-tts webrtc-avatar
+docker compose logs -f tts webrtc-avatar
 
 # Inspect service and health status
 docker compose ps

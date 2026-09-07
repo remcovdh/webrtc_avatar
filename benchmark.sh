@@ -38,7 +38,7 @@ if [[ "${build_images}" == "1" ]]; then
 fi
 
 mkdir -p inputs results/benchmarks
-docker compose up -d breeze-tts
+docker compose up -d tts
 
 force_args=()
 if [[ "${regenerate_preset}" == "1" ]]; then

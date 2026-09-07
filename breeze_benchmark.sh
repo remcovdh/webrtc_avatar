@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# This benchmark is intentionally Breeze-specific even when .env normally
+# selects Chatterbox.
+export TTS_PROVIDER=breeze
+
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${project_root}"
 
@@ -31,7 +35,7 @@ if [[ "${include_fast_all}" == "1" ]]; then
 fi
 
 if [[ "${BREEZE_BENCHMARK_BUILD:-0}" == "1" ]]; then
-  docker compose build breeze-tts
+  docker compose build tts
 fi
 
 # Isolate Breeze and free the portrait model's VRAM. This intentionally leaves
@@ -46,7 +50,7 @@ for profile in ${profiles}; do
   fi
   echo "[breeze-benchmark] ${profile}: ${flags[${profile}]:-eager baseline}"
   export BREEZE_FAST_ARGS="${flags[${profile}]}"
-  docker compose up -d --force-recreate breeze-tts
+  docker compose up -d --force-recreate tts
 
   healthy=0
   for _attempt in $(seq 1 240); do
@@ -58,12 +62,12 @@ for profile in ${profiles}; do
   done
   if [[ "${healthy}" != "1" ]]; then
     echo "${profile}" >> "${output_root}/failed.txt"
-    docker compose logs --tail=120 breeze-tts > "${output_root}/${profile}.log" 2>&1 || true
+    docker compose logs --tail=120 tts > "${output_root}/${profile}.log" 2>&1 || true
     echo "[breeze-benchmark] ${profile} failed to become healthy; continuing" >&2
     continue
   fi
 
-  if ! docker compose exec -T breeze-tts python /workspace/breeze_benchmark.py \
+  if ! docker compose exec -T tts python /workspace/breeze_benchmark.py \
       --scenario "${profile}" \
       --fast-args="${flags[${profile}]}" \
       --warmups "${warmups}" \
@@ -71,12 +75,12 @@ for profile in ${profiles}; do
       --capture-wav "/workspace/results/${profile}.wav" \
       --output "/workspace/results/${profile}.json"; then
     echo "${profile}" >> "${output_root}/failed.txt"
-    docker compose logs --tail=120 breeze-tts > "${output_root}/${profile}.log" 2>&1 || true
+    docker compose logs --tail=120 tts > "${output_root}/${profile}.log" 2>&1 || true
     echo "[breeze-benchmark] ${profile} failed during synthesis; continuing" >&2
     continue
   fi
-  docker compose cp "breeze-tts:/workspace/results/${profile}.json" "${output_root}/${profile}.json"
-  docker compose cp "breeze-tts:/workspace/results/${profile}.wav" "${output_root}/audio/${profile}.wav"
+  docker compose cp "tts:/workspace/results/${profile}.json" "${output_root}/${profile}.json"
+  docker compose cp "tts:/workspace/results/${profile}.wav" "${output_root}/audio/${profile}.wav"
 done
 
 python - "${output_root}" <<'PY'

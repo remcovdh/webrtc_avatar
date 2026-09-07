@@ -7,7 +7,7 @@ flp_checkpoints="${FLP_CHECKPOINT_DIR:-${flp_root}/checkpoints}"
 breeze_model="${BREEZE_MODEL_DIR:-/workspace/models/Breeze-TTS-2}"
 
 download_models() {
-  mkdir -p "${flp_checkpoints}" "${breeze_model}"
+  mkdir -p "${flp_checkpoints}"
 
   if [[ ! -f "${flp_checkpoints}/.download-complete" ]]; then
     echo "[models] Downloading FasterLivePortrait checkpoints"
@@ -35,6 +35,10 @@ download_models() {
     touch "${flp_checkpoints}/chinese-hubert-base/.download-complete"
   fi
 
+}
+
+download_breeze_model() {
+  mkdir -p "${breeze_model}"
   if [[ ! -f "${breeze_model}/.download-complete" ]]; then
     echo "[models] Downloading Breeze TTS 2"
     python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BreezeBlue/Breeze-TTS-2', local_dir='${breeze_model}')"
@@ -51,6 +55,7 @@ case "${mode}" in
     exec uvicorn server:app --host 0.0.0.0 --port "${PORT:-8000}"
     ;;
   tts)
+    download_breeze_model
     cd /workspace/breeze-tts
     breeze_fast_args=()
     if [[ -n "${BREEZE_FAST_ARGS:-}" ]]; then
@@ -60,6 +65,13 @@ case "${mode}" in
     exec python -m breeze_infer.api "${breeze_model}" \
       --host 0.0.0.0 --port "${BREEZE_PORT:-7860}" \
       "${breeze_fast_args[@]}"
+    ;;
+  breeze)
+    "$0" tts
+    ;;
+  chatterbox)
+    cd /workspace
+    exec uvicorn chatterbox_api:app --host 0.0.0.0 --port "${CHATTERBOX_PORT:-7860}"
     ;;
   *)
     exec "$@"

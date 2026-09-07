@@ -47,6 +47,30 @@ ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["tts"]
 
 
+# Chatterbox is isolated from the avatar and Breeze dependency graphs. The
+# official package pins Torch 2.6, which predates the RTX 5080 stack used by
+# this project, so retain the CUDA 12.8 / Torch 2.9 runtime and install the
+# Chatterbox package without allowing pip to replace Torch or torchaudio.
+FROM common AS chatterbox
+
+ARG CHATTERBOX_VERSION=0.1.7
+WORKDIR /workspace
+RUN python -m pip install "numpy==1.26.4" \
+      "librosa==0.11.0" s3tokenizer "transformers==5.2.0" \
+      "diffusers==0.29.0" "safetensors==0.5.3" "conformer==0.3.2" \
+      "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master" \
+      spacy-pkuseg "pykakasi==2.3.0" pyloudnorm omegaconf \
+      fastapi uvicorn python-multipart \
+    && python -m pip install --no-deps "chatterbox-tts==${CHATTERBOX_VERSION}" \
+    && python -c "import torch, torchaudio; from chatterbox.tts_turbo import ChatterboxTurboTTS; assert torch.__version__.startswith('2.9.1'); print('Chatterbox import smoke test passed')"
+
+COPY entrypoint.sh chatterbox_api.py /workspace/
+RUN chmod +x /workspace/entrypoint.sh \
+    && python -m py_compile /workspace/chatterbox_api.py
+ENTRYPOINT ["/workspace/entrypoint.sh"]
+CMD ["chatterbox"]
+
+
 FROM common AS avatar
 
 ARG FASTER_LIVE_PORTRAIT_REF=master
@@ -118,11 +142,15 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html benchmark_avatar.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py /workspace/FasterLivePortrait/
+# test_tts_provider.py validates the Compose-level provider switch as well as
+# the Python adapter. Include the manifest in the build-test fixture so the
+# same test works both from the source tree and inside the image build.
+COPY docker-compose.yml /workspace/FasterLivePortrait/docker-compose.yml
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
-    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py
+    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py
 
 EXPOSE 8000
 ENTRYPOINT ["/workspace/entrypoint.sh"]
