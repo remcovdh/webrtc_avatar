@@ -142,7 +142,7 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py /workspace/FasterLivePortrait/
 # test_tts_provider.py validates the Compose-level provider switch as well as
 # the Python adapter. Include the manifest in the build-test fixture so the
 # same test works both from the source tree and inside the image build.
@@ -150,7 +150,7 @@ COPY docker-compose.yml /workspace/FasterLivePortrait/docker-compose.yml
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
-    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py
+    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py
 
 EXPOSE 8000
 ENTRYPOINT ["/workspace/entrypoint.sh"]

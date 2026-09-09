@@ -1,6 +1,61 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2l1-configurable-tts-build-fix`
+Current build: `neural-avatar-v2m-adaptive-prefetch`
+
+## v2M adaptive Chatterbox prefetch and opening continuity
+
+v2M addresses the single-RTX-5080 result where eager TTS prefetch reduced the
+first phrase renderer from about 12.5 to 7.4 neural FPS. With the default
+`adaptive` policy, the next Chatterbox request cannot start until FLP has
+published the current phrase's first video window and at least 0.50 seconds of
+playable audio/video is buffered. This protects the first visible window while
+retaining useful TTS overlap later in a longer phrase.
+
+Very short openings are also merged with phrase two. For example:
+
+```text
+Hello! This is my first neural streaming avatar test with Chatterbox.
+```
+
+is now one opening phrase rather than a 0.64-second `Hello!` clip followed by
+an unavoidable gap.
+
+The supplied `.env` enables the new policy:
+
+```dotenv
+AVATAR_TTS_PREFETCH=true
+AVATAR_TTS_PREFETCH_POLICY=adaptive
+AVATAR_TTS_PREFETCH_MIN_BUFFER_SECONDS=0.50
+AVATAR_MERGE_SHORT_OPENING_PHRASE=true
+AVATAR_PHRASE_MIN_FIRST_CHARS=24
+```
+
+Rollback choices require no rebuild:
+
+```dotenv
+# Serial v2L scheduling
+AVATAR_TTS_PREFETCH=false
+
+# Reproduce the aggressive shared-GPU experiment
+AVATAR_TTS_PREFETCH=true
+AVATAR_TTS_PREFETCH_POLICY=eager
+
+# Keep adaptive prefetch but restore the old tiny opening split
+AVATAR_MERGE_SHORT_OPENING_PHRASE=false
+```
+
+After editing `.env`, recreate the runtime container:
+
+```bash
+docker compose up -d --force-recreate webrtc-avatar
+docker compose logs -f webrtc-avatar
+```
+
+The timing table now includes `Next prefetch`. A value such as
+`adaptive @ 0.62 s` confirms that the future TTS request started only after a
+window was published with adequate playable buffer. `not launched` means the
+buffer never reached the configured threshold; the next phrase then follows
+the safe serial path.
 
 v2L.1 fixes the Docker build-time provider test by including the Compose
 manifest in its image-local test fixture. Runtime behavior is unchanged.
@@ -17,7 +72,8 @@ The archive defaults to Chatterbox Turbo for the local English latency test:
 TTS_PROVIDER=chatterbox
 CHATTERBOX_VARIANT=turbo
 TTS_DEFAULT_VOICE_MODE=preset-clone
-AVATAR_TTS_PREFETCH=false
+AVATAR_TTS_PREFETCH=true
+AVATAR_TTS_PREFETCH_POLICY=adaptive
 ```
 
 When upgrading from v2K, remove the old service name once so it cannot retain
@@ -84,16 +140,14 @@ Expected Chatterbox fields include:
 
 ```json
 {
-  "server_build": "neural-avatar-v2l1-configurable-tts-build-fix",
+  "server_build": "neural-avatar-v2m-adaptive-prefetch",
   "tts_provider": "chatterbox",
   "tts_ready": true
 }
 ```
 
-Keep `AVATAR_TTS_PREFETCH=false` for the first controlled comparison on one
-RTX 5080. Measure Chatterbox warm TTS RTF and FLP neural FPS first. Only then
-set it to `true`; Chatterbox is smaller than Breeze, but concurrent GPU work
-can still reduce portrait FPS.
+The v2M default uses guarded adaptive prefetch. Set
+`AVATAR_TTS_PREFETCH=false` whenever a serial baseline is needed.
 
 ## v2K incremental FLP frame windows
 

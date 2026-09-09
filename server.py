@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2l1-configurable-tts-build-fix"
+SERVER_BUILD = "neural-avatar-v2m-adaptive-prefetch"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -140,8 +140,18 @@ TTS_STARTUP_POLL_SECONDS = max(
 )
 PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
 TTS_PREFETCH = _env_bool("TTS_PREFETCH", False)
+TTS_PREFETCH_POLICY = os.getenv("TTS_PREFETCH_POLICY", "adaptive").strip().lower()
+if TTS_PREFETCH_POLICY not in {"adaptive", "eager"}:
+    raise ValueError("TTS_PREFETCH_POLICY must be adaptive or eager")
+TTS_PREFETCH_MIN_BUFFER_SECONDS = max(
+    0.0, float(os.getenv("TTS_PREFETCH_MIN_BUFFER_SECONDS", "0.50"))
+)
 PERSISTENT_PHRASE_MOTION = _env_bool("PERSISTENT_PHRASE_MOTION", True)
 AVATAR_RELATIVE_MOTION = _env_bool("AVATAR_RELATIVE_MOTION", True)
+MERGE_SHORT_OPENING_PHRASE = _env_bool("MERGE_SHORT_OPENING_PHRASE", True)
+PHRASE_MIN_FIRST_CHARS = max(
+    1, int(os.getenv("PHRASE_MIN_FIRST_CHARS", "24"))
+)
 PHRASE_FIRST_TARGET_CHARS = max(
     8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
 )
@@ -377,6 +387,17 @@ def _split_phrases(text: str) -> list[str]:
             phrases[-1] = f"{phrases[-1]} {tail}"
         else:
             phrases.append(tail)
+
+    # A tiny greeting starts quickly but exhausts its media before the next
+    # phrase can produce a video window. Merge it with phrase two to trade a
+    # small amount of initial latency for uninterrupted opening playback.
+    if (
+        MERGE_SHORT_OPENING_PHRASE
+        and len(phrases) >= 2
+        and len(phrases[0]) < PHRASE_MIN_FIRST_CHARS
+        and len(phrases[0]) + 1 + len(phrases[1]) <= PHRASE_MAX_CHARS
+    ):
+        phrases[0:2] = [f"{phrases[0]} {phrases[1]}"]
 
     return phrases
 
@@ -923,6 +944,8 @@ async def _render_phrase_in_windows(
     phrase_index: int,
     phrase_count: int,
     request_started: float,
+    prefetch_callback: Any | None = None,
+    prefetch_min_buffer_seconds: float = 0.0,
 ) -> tuple[float, dict[str, Any], int]:
     """Render on a worker thread and publish completed windows on the event loop."""
     loop = asyncio.get_running_loop()
@@ -956,6 +979,8 @@ async def _render_phrase_in_windows(
     media_duration: float | None = None
     first_window_ms: int | None = None
     published_windows = 0
+    deferred_prefetch_started = False
+    deferred_prefetch_buffer_seconds: float | None = None
 
     try:
         while not render_task.done() or not windows.empty():
@@ -995,6 +1020,18 @@ async def _render_phrase_in_windows(
                 playback.append_video_window(frames)
                 published_windows += 1
 
+            # Adaptive prefetch is deliberately evaluated only after at least
+            # one video window has been published. This protects first-frame
+            # latency from shared-GPU TTS contention and avoids starting work
+            # when the playable A/V buffer is already too shallow.
+            if (
+                prefetch_callback is not None
+                and not deferred_prefetch_started
+                and playback.buffered_seconds >= prefetch_min_buffer_seconds
+            ):
+                deferred_prefetch_buffer_seconds = playback.buffered_seconds
+                deferred_prefetch_started = bool(prefetch_callback())
+
         _unused_frames, _fps, render_detail = await render_task
     except Exception:
         if not render_task.done():
@@ -1007,6 +1044,12 @@ async def _render_phrase_in_windows(
     playback.finish_phrase_stream()
     render_detail["first_window_ms"] = first_window_ms
     render_detail["published_windows"] = published_windows
+    render_detail["deferred_prefetch_started"] = deferred_prefetch_started
+    render_detail["deferred_prefetch_buffer_seconds"] = (
+        round(deferred_prefetch_buffer_seconds, 3)
+        if deferred_prefetch_buffer_seconds is not None
+        else None
+    )
     return media_duration, render_detail, first_window_ms
 
 
@@ -1144,7 +1187,20 @@ async def _create_clip(
                         chunks=len(phrases),
                         message=f"Phrase {index}/{len(phrases)}: rendering facial motion…",
                     )
-                    if TTS_PREFETCH and index < len(phrases):
+                    next_prefetch_started = False
+                    next_prefetch_buffer_seconds: float | None = None
+
+                    def start_next_prefetch() -> bool:
+                        nonlocal tts_task
+                        nonlocal next_prefetch_started
+                        nonlocal next_prefetch_buffer_seconds
+                        if (
+                            not TTS_PREFETCH
+                            or index >= len(phrases)
+                            or tts_task is not None
+                        ):
+                            return False
+                        next_prefetch_buffer_seconds = playback.buffered_seconds
                         tts_task = asyncio.create_task(
                             _prepare_phrase_audio(
                                 phrases[index],
@@ -1156,6 +1212,11 @@ async def _create_clip(
                                 prefetched=True,
                             )
                         )
+                        next_prefetch_started = True
+                        return True
+
+                    if TTS_PREFETCH and TTS_PREFETCH_POLICY == "eager":
+                        start_next_prefetch()
                     buffer_before_render = playback.buffered_seconds
                     selected_stride, stride_reason = _select_render_stride(
                         index,
@@ -1180,6 +1241,14 @@ async def _create_clip(
                                 index,
                                 len(phrases),
                                 request_started,
+                                (
+                                    start_next_prefetch
+                                    if TTS_PREFETCH
+                                    and TTS_PREFETCH_POLICY == "adaptive"
+                                    and index < len(phrases)
+                                    else None
+                                ),
+                                TTS_PREFETCH_MIN_BUFFER_SECONDS,
                             )
                         )
                         first_ready_ms = (
@@ -1197,6 +1266,13 @@ async def _create_clip(
                             index == 1 or not PERSISTENT_PHRASE_MOTION,
                         )
                         media_duration = playback.append(frames, fps, pcm)
+                        if (
+                            TTS_PREFETCH
+                            and TTS_PREFETCH_POLICY == "adaptive"
+                            and playback.buffered_seconds
+                            >= TTS_PREFETCH_MIN_BUFFER_SECONDS
+                        ):
+                            start_next_prefetch()
                         first_ready_ms = (
                             round((time.perf_counter() - request_started) * 1000)
                             if index == 1
@@ -1207,6 +1283,12 @@ async def _create_clip(
                     render_detail["buffer_before_render_seconds"] = round(
                         buffer_before_render,
                         3,
+                    )
+                    render_detail["next_prefetch_started"] = next_prefetch_started
+                    render_detail["next_prefetch_buffer_seconds"] = (
+                        round(next_prefetch_buffer_seconds, 3)
+                        if next_prefetch_buffer_seconds is not None
+                        else None
                     )
                     render_seconds = time.perf_counter() - started
                     total_render += render_seconds
@@ -1221,7 +1303,8 @@ async def _create_clip(
                         "Phrase %d/%d timings: voice=%s cfg=%.2f tts=%.3fs tts_wait=%dms "
                         "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
                         "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
-                        "buffer_before=%.3fs motion=%dms "
+                        "buffer_before=%.3fs prefetch_policy=%s next_prefetch=%s "
+                        "prefetch_buffer=%.3fs motion=%dms "
                         "motion_reference_reset=%s persistent_motion=%s "
                         "frame_loop=%dms effective_fps=%.2f windows=%d first_window=%dms "
                         "pipeline=%dms "
@@ -1243,6 +1326,9 @@ async def _create_clip(
                         render_detail["adaptive_stride"],
                         render_detail["stride_reason"],
                         render_detail["buffer_before_render_seconds"],
+                        TTS_PREFETCH_POLICY if TTS_PREFETCH else "off",
+                        render_detail["next_prefetch_started"],
+                        render_detail["next_prefetch_buffer_seconds"] or 0.0,
                         render_detail["motion_ms"],
                         render_detail.get("motion_reference_reset", True),
                         render_detail.get("persistent_phrase_motion", False),
@@ -1273,6 +1359,15 @@ async def _create_clip(
                         tts_wait_ms=tts_wait_ms,
                         tts_overlap_ms=tts_overlap_ms,
                         tts_prefetched=audio_result["prefetched"],
+                        tts_prefetch_policy=(
+                            TTS_PREFETCH_POLICY if TTS_PREFETCH else "off"
+                        ),
+                        next_tts_prefetch_started=render_detail[
+                            "next_prefetch_started"
+                        ],
+                        next_tts_prefetch_buffer_seconds=render_detail[
+                            "next_prefetch_buffer_seconds"
+                        ],
                         tts_headers_ms=tts_detail["headers_ms"],
                         tts_first_byte_ms=tts_detail["first_byte_ms"],
                         tts_download_ms=tts_detail["download_ms"],
@@ -1600,6 +1695,8 @@ async def health() -> JSONResponse:
         "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
         "tts_prefetch": TTS_PREFETCH,
         "tts_prefetch_depth": 1 if TTS_PREFETCH else 0,
+        "tts_prefetch_policy": TTS_PREFETCH_POLICY,
+        "tts_prefetch_min_buffer_seconds": TTS_PREFETCH_MIN_BUFFER_SECONDS,
         "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
         "relative_motion": AVATAR_RELATIVE_MOTION,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
@@ -1610,6 +1707,8 @@ async def health() -> JSONResponse:
         "preset_clone_cfg_scale": TTS_PRESET_CLONE_CFG_SCALE,
         "preset_direction_cfg_scale": TTS_PRESET_DIRECTION_CFG_SCALE,
         "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
+        "merge_short_opening_phrase": MERGE_SHORT_OPENING_PHRASE,
+        "phrase_min_first_chars": PHRASE_MIN_FIRST_CHARS,
         "phrase_target_chars": PHRASE_TARGET_CHARS,
         "phrase_max_chars": PHRASE_MAX_CHARS,
         "error": startup_error,

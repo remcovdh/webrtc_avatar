@@ -91,9 +91,12 @@ services:
       ADAPTIVE_RENDER_STRIDE: "${AVATAR_ADAPTIVE_RENDER_STRIDE:-true}"
       CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-3}"
       CATCHUP_BUFFER_SECONDS: "${AVATAR_CATCHUP_BUFFER_SECONDS:-0.75}"
-      # v2C-B testing showed that concurrent TTS approximately halved portrait
-      # FPS on the shared laptop GPU. Keep serial scheduling for v2E.
-      TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-false}"
+      # v2M waits for the first video window and a minimum playable buffer
+      # before allowing one future TTS phrase onto the shared laptop GPU.
+      # Set false for serial v2L scheduling; policy=eager restores the old test.
+      TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-true}"
+      TTS_PREFETCH_POLICY: "${AVATAR_TTS_PREFETCH_POLICY:-adaptive}"
+      TTS_PREFETCH_MIN_BUFFER_SECONDS: "${AVATAR_TTS_PREFETCH_MIN_BUFFER_SECONDS:-0.50}"
       # Keep FasterLivePortrait's initial driving reference for every phrase
       # in one utterance. Set false for immediate v2H phrase-reset behavior.
       PERSISTENT_PHRASE_MOTION: "${AVATAR_PERSISTENT_PHRASE_MOTION:-true}"
@@ -135,6 +138,8 @@ services:
       # generate later phrases while the current media queue is consumed.
       PROGRESSIVE_PHRASE_MODE: "true"
       PHRASE_FIRST_TARGET_CHARS: "${AVATAR_PHRASE_FIRST_TARGET_CHARS:-48}"
+      MERGE_SHORT_OPENING_PHRASE: "${AVATAR_MERGE_SHORT_OPENING_PHRASE:-true}"
+      PHRASE_MIN_FIRST_CHARS: "${AVATAR_PHRASE_MIN_FIRST_CHARS:-24}"
       PHRASE_TARGET_CHARS: "${AVATAR_PHRASE_TARGET_CHARS:-100}"
       PHRASE_MAX_CHARS: "${AVATAR_PHRASE_MAX_CHARS:-160}"
       # For remote/NAT clients, set a TURN server JSON array here.
