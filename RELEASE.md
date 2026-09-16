@@ -1,3 +1,29 @@
+# neural-avatar-v2n1-av-sync-gate
+
+## v2N.1 synchronization correction
+
+- Gates incremental audio consumption on the same `started` state set by the
+  first completed FLP video window.
+- Prevents speech from leading facial motion by one first-window render delay.
+- Replaces the previous source-order test with a regression check for the
+  actual playback gate.
+- Removes the black-producing lip-retargeting case from the default visual
+  matrix while leaving it available through an explicit matrix override.
+
+# neural-avatar-v2n-visual-quality-benchmark
+
+## v2N visual-quality benchmark
+
+- Exposes animation region, driving multiplier, lip normalization, and eye/lip
+  retargeting through `.env` and Compose.
+- Reports the active visual configuration through `/health` and phrase metrics.
+- Adds `quality_benchmark.sh` with a controlled six-scenario mouth/gaze matrix.
+- Records every headless WebRTC run as an MP4 alongside exact resolved settings,
+  raw events, phrase CSV, logs, and comparison reports.
+- Forces render stride 1 and disables adaptive catch-up/prefetch during visual
+  comparisons so performance shortcuts do not confound articulation quality.
+- Keeps the accepted v2M runtime defaults unchanged.
+
 # neural-avatar-v2i-persistent-motion
 
 ## v2I optimization

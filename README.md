@@ -1,6 +1,100 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2m-adaptive-prefetch`
+Current build: `neural-avatar-v2n1-av-sync-gate`
+
+## v2N.1 incremental A/V synchronization gate
+
+The first v2N recordings exposed a common offset in every visual scenario.
+Incremental mode queued audio before FLP finished its first video window, and
+the WebRTC audio track consumed that queue immediately. v2N.1 now emits silence
+until the first rendered video window sets the shared playback state to
+`started`. Audio and animated video therefore begin on the same playback gate.
+
+This is intentionally independent of animation region and driving multiplier.
+Re-run the baseline first; if it is synchronized, continue with the mouth
+comparison. The experimental lip-retargeting scenario was removed from the
+default matrix because it produced an entirely black video on the tested
+portrait. It remains available as an explicit opt-in scenario.
+
+## v2N repeatable mouth and gaze benchmark
+
+v2N exposes FasterLivePortrait's visual-motion controls and adds a headless
+quality matrix. The upward-looking result is an eye-expression problem: the
+face can remain frontal while JoyVASA/FLP drives both eyes upward. A `lip`
+animation-region run deliberately holds non-mouth motion still, making it a
+useful diagnosis and a possible camera-facing presentation mode. It will look
+less alive because it also removes driven blinks and head motion.
+
+Run the complete default matrix with one command:
+
+```bash
+chmod +x quality_benchmark.sh
+QUALITY_BENCHMARK_BUILD=1 ./quality_benchmark.sh
+```
+
+After the first build, normally use:
+
+```bash
+./quality_benchmark.sh
+```
+
+Each scenario gets its own timestamped directory under
+`results/quality-benchmarks/`. It contains:
+
+- a separate MP4 for every warm-up and measured WebRTC request;
+- `benchmark.json`, `phrases.csv`, and `report.md`;
+- the exact `/health` response and resolved Compose configuration;
+- the avatar-container log; and
+- a cross-scenario Markdown and CSV comparison at the timestamp root.
+
+The fixed sentence contains closed-lip consonants and open vowels so mouth
+amplitude is easy to compare. The default matrix is:
+
+| Scenario | Region | Multiplier | Normalize lip | Eye retarget | Lip retarget | Purpose |
+| --- | --- | ---: | :---: | :---: | :---: | --- |
+| `baseline` | `all` | 1.00 | yes | no | no | Current behavior. |
+| `lip-100` | `lip` | 1.00 | yes | no | no | Isolate mouth; suppress driven upward gaze. |
+| `lip-115` | `lip` | 1.15 | yes | no | no | Mild mouth-motion amplification. |
+| `lip-130` | `lip` | 1.30 | yes | no | no | Stronger, still conservative amplification. |
+| `exp-115` | `exp` | 1.15 | yes | no | no | Expression without pose animation. |
+
+The black-producing retargeting case is no longer run automatically. To repeat
+it deliberately for another portrait:
+
+```bash
+QUALITY_BENCHMARK_SCENARIOS='lip-115-retarget,lip,1.15,true,false,true' \
+./quality_benchmark.sh
+```
+
+These runtime settings require container recreation but not image rebuilding:
+
+```dotenv
+AVATAR_ANIMATION_REGION=all
+AVATAR_DRIVING_MULTIPLIER=1.0
+AVATAR_NORMALIZE_LIP=true
+AVATAR_EYE_RETARGETING=false
+AVATAR_LIP_RETARGETING=false
+```
+
+Allowed regions are `all`, `exp`, `pose`, `lip`, and `eyes`; the multiplier
+must be between `0.0` and `2.0`. Do not raise several controls at once when
+diagnosing quality. Start at 1.15 and inspect teeth, lip edges, cheeks, and
+frame-to-frame stability before trying 1.30. Retargeting remains off by
+default because it can improve identity mapping but can also create artifacts.
+
+Override the matrix without editing the script. Each semicolon-separated row
+is `name,region,multiplier,normalize_lip,eye_retargeting,lip_retargeting`:
+
+```bash
+QUALITY_BENCHMARK_SCENARIOS='baseline,all,1.0,true,false,false;mouth,lip,1.2,true,false,false' \
+QUALITY_BENCHMARK_REPEATS=2 \
+./quality_benchmark.sh
+```
+
+Use a clear, neutral, front-facing source image with a relaxed closed mouth for
+the fairest articulation test. The current portrait's slightly open resting
+mouth and visible teeth can reduce the apparent open/closed range even when
+timing is correct.
 
 ## v2M adaptive Chatterbox prefetch and opening continuity
 
@@ -140,7 +234,7 @@ Expected Chatterbox fields include:
 
 ```json
 {
-  "server_build": "neural-avatar-v2m-adaptive-prefetch",
+  "server_build": "neural-avatar-v2n1-av-sync-gate",
   "tts_provider": "chatterbox",
   "tts_ready": true
 }

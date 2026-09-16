@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRecorder
 
 
 DEFAULT_PRESET_TEXT = (
@@ -248,6 +249,7 @@ class AvatarBenchmarkClient:
         base_url: str,
         timeout_seconds: float,
         ready_event_grace_seconds: float = 2.0,
+        record_path: Path | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
@@ -257,6 +259,10 @@ class AvatarBenchmarkClient:
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.opened = asyncio.Event()
         self.track_tasks: set[asyncio.Task[Any]] = set()
+        self.record_path = record_path
+        self.recorder = MediaRecorder(str(record_path)) if record_path else None
+        self.recording_started = False
+        self.received_tracks = 0
 
         @self.channel.on("open")
         def opened() -> None:
@@ -272,9 +278,13 @@ class AvatarBenchmarkClient:
 
         @self.peer.on("track")
         def track_received(track: Any) -> None:
-            task = asyncio.create_task(_drain_track(track))
-            self.track_tasks.add(task)
-            task.add_done_callback(self.track_tasks.discard)
+            self.received_tracks += 1
+            if self.recorder is not None:
+                self.recorder.addTrack(track)
+            else:
+                task = asyncio.create_task(_drain_track(track))
+                self.track_tasks.add(task)
+                task.add_done_callback(self.track_tasks.discard)
 
     async def connect(self, ice_servers: list[dict[str, Any]]) -> None:
         # The local benchmark normally uses no ICE servers. The argument is kept
@@ -319,6 +329,13 @@ class AvatarBenchmarkClient:
                 "optional server ready event.",
                 flush=True,
             )
+        if self.recorder is not None:
+            if self.received_tracks < 2:
+                raise RuntimeError(
+                    "Cannot record benchmark: expected WebRTC audio and video tracks"
+                )
+            await self.recorder.start()
+            self.recording_started = True
 
     async def request(
         self,
@@ -373,6 +390,9 @@ class AvatarBenchmarkClient:
         }
 
     async def close(self) -> None:
+        if self.recorder is not None and self.recording_started:
+            await self.recorder.stop()
+            self.recording_started = False
         await self.peer.close()
         for task in tuple(self.track_tasks):
             task.cancel()
@@ -568,6 +588,15 @@ def _markdown_report(payload: dict[str, Any]) -> str:
             persistent=payload["health"].get("persistent_phrase_motion", False),
         ),
         "",
+        "Visual policy: region `{region}`, multiplier `{multiplier}`, normalize "
+        "lip `{normalize}`, eye retargeting `{eye}`, lip retargeting `{lip}`".format(
+            region=payload["health"].get("animation_region", "unknown"),
+            multiplier=payload["health"].get("driving_multiplier", "unknown"),
+            normalize=payload["health"].get("normalize_lip", "unknown"),
+            eye=payload["health"].get("eye_retargeting", "unknown"),
+            lip=payload["health"].get("lip_retargeting", "unknown"),
+        ),
+        "",
         "## Median results",
         "",
         "| Mode | First ready | FLP first window | First byte | TTS RTF | Render RTF | Neural FPS | Media | Audio gap | Video hold | Client wall |",
@@ -617,6 +646,7 @@ def _markdown_report(payload: dict[str, Any]) -> str:
             "- Compare TTS RTF rather than TTS milliseconds when modes produce different speech durations.",
             "- Neural FPS should remain similar because TTS prefetch is disabled.",
             "- This harness measures performance and stability; voice identity and naturalness still require listening.",
+            "- When media recording is enabled, each run's MP4 filename is stored in benchmark.json under raw_runs[].recording.",
             "- Keep JSON and CSV files when changing code or configuration so later versions remain comparable.",
             "",
         ]
@@ -649,6 +679,11 @@ def compare_results(args: argparse.Namespace) -> int:
                     "catchup_render_stride": health.get("catchup_render_stride"),
                     "catchup_buffer_seconds": health.get("catchup_buffer_seconds"),
                     "tts_prefetch": health.get("tts_prefetch"),
+                    "animation_region": health.get("animation_region"),
+                    "driving_multiplier": health.get("driving_multiplier"),
+                    "normalize_lip": health.get("normalize_lip"),
+                    "eye_retargeting": health.get("eye_retargeting"),
+                    "lip_retargeting": health.get("lip_retargeting"),
                     "phrase_first_target_chars": health.get(
                         "phrase_first_target_chars"
                     ),
@@ -696,16 +731,19 @@ def compare_results(args: argparse.Namespace) -> int:
         "All discovered runs are listed. Compare rows with the same benchmark-text "
         "and preset hashes.",
         "",
-        "| Date | Scenario | Mode | Runs | First ready | FLP first window | First byte | TTS RTF | Render RTF | Neural FPS | Media | Audio gap | Video hold |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Date | Scenario | Visual config | Mode | Runs | First ready | FLP first window | First byte | TTS RTF | Render RTF | Neural FPS | Media | Audio gap | Video hold |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            "| {date} | {scenario} | {mode} | {runs} | {ready:.0f} ms | {window:.0f} ms | "
+            "| {date} | {scenario} | {region} × {multiplier}; lip-retarget={lip} | {mode} | {runs} | {ready:.0f} ms | {window:.0f} ms | "
             "{byte:.0f} ms | {tts:.3f} | {render:.3f} | {fps:.2f} | "
             "{media:.0f} ms | {gap:.0f} ms | {hold:.0f} ms |".format(
                 date=str(row["created_utc"] or "")[:19],
                 scenario=row["scenario"],
+                region=row.get("animation_region") or "unknown",
+                multiplier=row.get("driving_multiplier") or "unknown",
+                lip=row.get("lip_retargeting"),
                 mode=row["mode"],
                 runs=row["measured_runs"] or 0,
                 ready=row["median_first_ready_ms"] or 0,
@@ -763,57 +801,72 @@ async def run_benchmark(args: argparse.Namespace) -> int:
     if fixture_manifest_path.is_file():
         fixture_manifest = json.loads(fixture_manifest_path.read_text(encoding="utf-8"))
 
-    client = AvatarBenchmarkClient(base_url, args.timeout_seconds)
     runs: list[dict[str, Any]] = []
     run_index = 0
-    try:
-        await client.connect(client_config.get("iceServers", []))
-        for mode in modes:
-            for warmup_index in range(args.warmups):
-                run_index += 1
-                instruction = (
-                    args.direction_instruction
-                    if mode == "preset-direction"
-                    else args.design_instruction
-                )
-                print(f"Warm-up {warmup_index + 1}/{args.warmups}: {mode}", flush=True)
-                result = await client.request(
-                    text=args.warmup_text,
-                    mode=mode,
-                    instruction=instruction,
-                )
-                result.update(
-                    run_index=run_index,
-                    warmup=True,
-                    gpu_after=_gpu_snapshot(),
-                )
-                runs.append(result)
 
-        for repeat in range(1, args.repeats + 1):
-            for mode in modes:
-                run_index += 1
-                instruction = (
-                    args.direction_instruction
-                    if mode == "preset-direction"
-                    else args.design_instruction
-                )
-                print(f"Measured repeat {repeat}/{args.repeats}: {mode}", flush=True)
-                gpu_before = _gpu_snapshot()
-                result = await client.request(
-                    text=args.text,
+    async def execute(
+        *, mode: str, text: str, warmup: bool, repeat: int | None = None
+    ) -> dict[str, Any]:
+        nonlocal run_index
+        run_index += 1
+        phase = "warmup" if warmup else f"repeat-{repeat:02d}"
+        recording_path = (
+            output_dir / f"run-{run_index:03d}-{phase}-{mode}.mp4"
+            if args.record_media
+            else None
+        )
+        instruction = (
+            args.direction_instruction
+            if mode == "preset-direction"
+            else args.design_instruction
+        )
+        client = AvatarBenchmarkClient(
+            base_url,
+            args.timeout_seconds,
+            record_path=recording_path,
+        )
+        try:
+            await client.connect(client_config.get("iceServers", []))
+            gpu_before = _gpu_snapshot()
+            result = await client.request(
+                text=text,
+                mode=mode,
+                instruction=instruction,
+            )
+            if recording_path is not None and args.recording_tail_seconds > 0:
+                await asyncio.sleep(args.recording_tail_seconds)
+        finally:
+            await client.close()
+        result.update(
+            run_index=run_index,
+            warmup=warmup,
+            repeat=repeat,
+            recording=(
+                str(recording_path) if recording_path is not None else None
+            ),
+            gpu_before=gpu_before,
+            gpu_after=_gpu_snapshot(),
+        )
+        return result
+
+    for mode in modes:
+        for warmup_index in range(args.warmups):
+            print(f"Warm-up {warmup_index + 1}/{args.warmups}: {mode}", flush=True)
+            runs.append(
+                await execute(mode=mode, text=args.warmup_text, warmup=True)
+            )
+
+    for repeat in range(1, args.repeats + 1):
+        for mode in modes:
+            print(f"Measured repeat {repeat}/{args.repeats}: {mode}", flush=True)
+            runs.append(
+                await execute(
                     mode=mode,
-                    instruction=instruction,
-                )
-                result.update(
-                    run_index=run_index,
+                    text=args.text,
                     warmup=False,
                     repeat=repeat,
-                    gpu_before=gpu_before,
-                    gpu_after=_gpu_snapshot(),
                 )
-                runs.append(result)
-    finally:
-        await client.close()
+            )
 
     summary = _summarize(runs, modes)
     payload = {
@@ -836,6 +889,8 @@ async def run_benchmark(args: argparse.Namespace) -> int:
             "text": args.text,
             "design_instruction": args.design_instruction,
             "direction_instruction": args.direction_instruction,
+            "record_media": args.record_media,
+            "recording_tail_seconds": args.recording_tail_seconds,
         },
         "summary": summary,
         "raw_runs": runs,
@@ -903,6 +958,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--direction-instruction", default=DEFAULT_DIRECTION_INSTRUCTION
     )
     run.add_argument("--timeout-seconds", type=float, default=900.0)
+    run.add_argument(
+        "--record-media",
+        action="store_true",
+        help="Record every warm-up and measured WebRTC run to a separate MP4",
+    )
+    run.add_argument(
+        "--recording-tail-seconds",
+        type=float,
+        default=0.25,
+        help="Keep recording briefly after the server reports completion",
+    )
 
     compare = commands.add_parser(
         "compare", description="Combine saved scenario results into one report"
@@ -928,6 +994,8 @@ async def async_main() -> int:
         return compare_results(args)
     if args.repeats < 1 or args.warmups < 0:
         raise ValueError("--repeats must be at least 1 and --warmups cannot be negative")
+    if args.recording_tail_seconds < 0:
+        raise ValueError("--recording-tail-seconds cannot be negative")
     return await run_benchmark(args)
 
 

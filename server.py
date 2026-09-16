@@ -46,7 +46,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2m-adaptive-prefetch"
+SERVER_BUILD = "neural-avatar-v2n1-av-sync-gate"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -148,6 +148,17 @@ TTS_PREFETCH_MIN_BUFFER_SECONDS = max(
 )
 PERSISTENT_PHRASE_MOTION = _env_bool("PERSISTENT_PHRASE_MOTION", True)
 AVATAR_RELATIVE_MOTION = _env_bool("AVATAR_RELATIVE_MOTION", True)
+AVATAR_ANIMATION_REGION = os.getenv("AVATAR_ANIMATION_REGION", "all").strip().lower()
+if AVATAR_ANIMATION_REGION not in {"all", "exp", "pose", "lip", "eyes"}:
+    raise ValueError(
+        "AVATAR_ANIMATION_REGION must be one of: all, exp, pose, lip, eyes"
+    )
+AVATAR_DRIVING_MULTIPLIER = float(os.getenv("AVATAR_DRIVING_MULTIPLIER", "1.0"))
+if not 0.0 <= AVATAR_DRIVING_MULTIPLIER <= 2.0:
+    raise ValueError("AVATAR_DRIVING_MULTIPLIER must be between 0.0 and 2.0")
+AVATAR_NORMALIZE_LIP = _env_bool("AVATAR_NORMALIZE_LIP", True)
+AVATAR_EYE_RETARGETING = _env_bool("AVATAR_EYE_RETARGETING", False)
+AVATAR_LIP_RETARGETING = _env_bool("AVATAR_LIP_RETARGETING", False)
 MERGE_SHORT_OPENING_PHRASE = _env_bool("MERGE_SHORT_OPENING_PHRASE", True)
 PHRASE_MIN_FIRST_CHARS = max(
     1, int(os.getenv("PHRASE_MIN_FIRST_CHARS", "24"))
@@ -335,8 +346,22 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     # below then keeps one reference across all phrases in an utterance.
     cfg.infer_params.flag_relative_motion = AVATAR_RELATIVE_MOTION
     cfg.infer_params.flag_stitching = True
-    cfg.infer_params.animation_region = "all"
+    cfg.infer_params.animation_region = AVATAR_ANIMATION_REGION
+    cfg.infer_params.driving_multiplier = AVATAR_DRIVING_MULTIPLIER
+    cfg.infer_params.flag_normalize_lip = AVATAR_NORMALIZE_LIP
+    cfg.infer_params.flag_eye_retargeting = AVATAR_EYE_RETARGETING
+    cfg.infer_params.flag_lip_retargeting = AVATAR_LIP_RETARGETING
     cfg.infer_params.cfg_scale = float(os.getenv("JOYVASA_CFG_SCALE", "2.8"))
+
+    LOG.info(
+        "Visual motion config: region=%s multiplier=%.2f normalize_lip=%s "
+        "eye_retargeting=%s lip_retargeting=%s",
+        AVATAR_ANIMATION_REGION,
+        AVATAR_DRIVING_MULTIPLIER,
+        AVATAR_NORMALIZE_LIP,
+        AVATAR_EYE_RETARGETING,
+        AVATAR_LIP_RETARGETING,
+    )
 
     loaded = GradioLivePortraitPipeline(cfg=cfg, is_animal=False)
     if not loaded.prepare_source(str(AVATAR_PATH), realtime=False):
@@ -560,7 +585,11 @@ class PlaybackBuffer:
         return BASE_AVATAR
 
     def next_audio(self) -> np.ndarray:
-        if self.audio:
+        # Incremental rendering queues phrase audio before FLP has completed
+        # its first video window. Do not consume that audio until the first
+        # window atomically sets `started`; otherwise speech leads the mouth by
+        # approximately one first-window render interval.
+        if self.started and self.audio:
             return self.audio.popleft()
         if self.started and self.producing:
             self.audio_underruns += 1
@@ -888,6 +917,11 @@ def _render_animation_direct(
         "motion_reference_reset": reset_motion_reference,
         "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
         "relative_motion": AVATAR_RELATIVE_MOTION,
+        "animation_region": AVATAR_ANIMATION_REGION,
+        "driving_multiplier": AVATAR_DRIVING_MULTIPLIER,
+        "normalize_lip": AVATAR_NORMALIZE_LIP,
+        "eye_retargeting": AVATAR_EYE_RETARGETING,
+        "lip_retargeting": AVATAR_LIP_RETARGETING,
         "incremental_windows": window_callback is not None,
         "window_size": RENDER_WINDOW_FRAMES if window_callback is not None else 0,
         "window_count": window_index,
@@ -1388,6 +1422,21 @@ async def _create_clip(
                         render_persistent_phrase_motion=render_detail.get(
                             "persistent_phrase_motion", False
                         ),
+                        render_animation_region=render_detail.get(
+                            "animation_region", AVATAR_ANIMATION_REGION
+                        ),
+                        render_driving_multiplier=render_detail.get(
+                            "driving_multiplier", AVATAR_DRIVING_MULTIPLIER
+                        ),
+                        render_normalize_lip=render_detail.get(
+                            "normalize_lip", AVATAR_NORMALIZE_LIP
+                        ),
+                        render_eye_retargeting=render_detail.get(
+                            "eye_retargeting", AVATAR_EYE_RETARGETING
+                        ),
+                        render_lip_retargeting=render_detail.get(
+                            "lip_retargeting", AVATAR_LIP_RETARGETING
+                        ),
                         render_frame_loop_ms=render_detail["frame_loop_ms"],
                         render_effective_fps=render_detail["effective_fps"],
                         render_incremental_windows=render_detail.get(
@@ -1699,6 +1748,11 @@ async def health() -> JSONResponse:
         "tts_prefetch_min_buffer_seconds": TTS_PREFETCH_MIN_BUFFER_SECONDS,
         "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
         "relative_motion": AVATAR_RELATIVE_MOTION,
+        "animation_region": AVATAR_ANIMATION_REGION,
+        "driving_multiplier": AVATAR_DRIVING_MULTIPLIER,
+        "normalize_lip": AVATAR_NORMALIZE_LIP,
+        "eye_retargeting": AVATAR_EYE_RETARGETING,
+        "lip_retargeting": AVATAR_LIP_RETARGETING,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
         "voice_modes": sorted(SUPPORTED_VOICE_MODES),
         "preset_voice_configured": preset_configured,

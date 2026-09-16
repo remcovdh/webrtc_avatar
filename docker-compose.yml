@@ -103,6 +103,13 @@ services:
       # Required for FasterLivePortrait to apply its stored first-frame motion
       # reference. Set false together with persistence for v2H behavior.
       AVATAR_RELATIVE_MOTION: "${AVATAR_RELATIVE_MOTION:-true}"
+      # Visual-quality controls. `lip` is useful for diagnosing unwanted eye
+      # motion; `all` retains full facial/head animation.
+      AVATAR_ANIMATION_REGION: "${AVATAR_ANIMATION_REGION:-all}"
+      AVATAR_DRIVING_MULTIPLIER: "${AVATAR_DRIVING_MULTIPLIER:-1.0}"
+      AVATAR_NORMALIZE_LIP: "${AVATAR_NORMALIZE_LIP:-true}"
+      AVATAR_EYE_RETARGETING: "${AVATAR_EYE_RETARGETING:-false}"
+      AVATAR_LIP_RETARGETING: "${AVATAR_LIP_RETARGETING:-false}"
       # Voice modes exposed in the browser:
       #   design           = reference-free voice design with CFG 4
       #   preset-clone     = fixed reference identity with CFG 1
