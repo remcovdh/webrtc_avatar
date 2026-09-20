@@ -9,10 +9,29 @@ quality_warmups="${QUALITY_BENCHMARK_WARMUPS:-1}"
 quality_mode="${QUALITY_BENCHMARK_MODE:-preset-clone}"
 quality_text="${QUALITY_BENCHMARK_TEXT:-Baby, please meet me by the bright blue moon. Open your mouth and say: amazing, wonderful, absolutely beautiful.}"
 quality_scenarios="${QUALITY_BENCHMARK_SCENARIOS:-baseline,all,1.00,true,false,false;lip-100,lip,1.00,true,false,false;lip-115,lip,1.15,true,false,false;lip-130,lip,1.30,true,false,false;exp-115,exp,1.15,true,false,false}"
+quality_profile="${QUALITY_BENCHMARK_PROFILE:-runtime}"
 build_images="${QUALITY_BENCHMARK_BUILD:-0}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-host_output="results/quality-benchmarks/${timestamp}"
-container_output="/workspace/results/quality-benchmarks/${timestamp}"
+
+case "${quality_profile}" in
+  runtime)
+    render_stride=2
+    adaptive_stride=true
+    incremental_windows=true
+    ;;
+  visual)
+    render_stride=1
+    adaptive_stride=false
+    incremental_windows=false
+    ;;
+  *)
+    echo "[quality] QUALITY_BENCHMARK_PROFILE must be runtime or visual" >&2
+    exit 2
+    ;;
+esac
+
+host_output="results/quality-benchmarks/${timestamp}-${quality_profile}"
+container_output="/workspace/results/quality-benchmarks/${timestamp}-${quality_profile}"
 
 if [[ ! "${quality_repeats}" =~ ^[1-9][0-9]*$ ]]; then
   echo "[quality] QUALITY_BENCHMARK_REPEATS must be at least 1" >&2
@@ -28,6 +47,7 @@ fi
 
 mkdir -p "${host_output}"
 docker compose up -d tts
+echo "[quality] Profile=${quality_profile} stride=${render_stride} adaptive=${adaptive_stride} incremental=${incremental_windows}"
 
 IFS=';' read -r -a scenarios <<< "${quality_scenarios}"
 for raw_scenario in "${scenarios[@]}"; do
@@ -62,8 +82,9 @@ for raw_scenario in "${scenarios[@]}"; do
   AVATAR_NORMALIZE_LIP="${normalize_lip}" \
   AVATAR_EYE_RETARGETING="${eye_retarget}" \
   AVATAR_LIP_RETARGETING="${lip_retarget}" \
-  AVATAR_RENDER_STRIDE=1 \
-  AVATAR_ADAPTIVE_RENDER_STRIDE=false \
+  AVATAR_RENDER_STRIDE="${render_stride}" \
+  AVATAR_ADAPTIVE_RENDER_STRIDE="${adaptive_stride}" \
+  AVATAR_INCREMENTAL_FRAME_WINDOWS="${incremental_windows}" \
   AVATAR_TTS_PREFETCH=false \
     docker compose up -d --force-recreate webrtc-avatar
 
@@ -86,8 +107,9 @@ for raw_scenario in "${scenarios[@]}"; do
   AVATAR_NORMALIZE_LIP="${normalize_lip}" \
   AVATAR_EYE_RETARGETING="${eye_retarget}" \
   AVATAR_LIP_RETARGETING="${lip_retarget}" \
-  AVATAR_RENDER_STRIDE=1 \
-  AVATAR_ADAPTIVE_RENDER_STRIDE=false \
+  AVATAR_RENDER_STRIDE="${render_stride}" \
+  AVATAR_ADAPTIVE_RENDER_STRIDE="${adaptive_stride}" \
+  AVATAR_INCREMENTAL_FRAME_WINDOWS="${incremental_windows}" \
   AVATAR_TTS_PREFETCH=false \
     docker compose config > "${scenario_host}/compose-resolved.yaml"
   curl --fail --silent http://127.0.0.1:8000/health > "${scenario_host}/health.json"

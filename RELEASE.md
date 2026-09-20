@@ -1,3 +1,23 @@
+# neural-avatar-v2n2-1-build-fixture-fix
+
+## v2N.2.1 build correction
+
+- Copies `quality_benchmark.sh` into `/workspace/FasterLivePortrait` before
+  the Docker build executes `test_visual_quality.py`.
+- Keeps all v2N.2 runtime and benchmark-profile behavior unchanged.
+
+# neural-avatar-v2n2-benchmark-profiles
+
+## v2N.2 benchmark correction
+
+- Makes the visual-quality runner default to a deployable stride-2 adaptive
+  incremental runtime profile.
+- Adds a non-incremental stride-1 visual profile that renders before playback,
+  preserving synchronization for full-detail artifact comparison.
+- Names result roots with `-runtime` or `-visual` to prevent invalid comparisons.
+- Documents why a roughly 11.5 neural-FPS renderer cannot stream 25 unique
+  frames per second without progressively falling behind audio.
+
 # neural-avatar-v2n1-av-sync-gate
 
 ## v2N.1 synchronization correction

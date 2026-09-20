@@ -11,6 +11,9 @@ class VisualQualitySourceTests(unittest.TestCase):
         cls.server = (root / "server.py").read_text(encoding="utf-8")
         cls.benchmark = (root / "benchmark_avatar.py").read_text(encoding="utf-8")
         cls.compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        cls.quality_runner = (root / "quality_benchmark.sh").read_text(
+            encoding="utf-8"
+        )
 
     def test_flp_visual_controls_are_wired(self) -> None:
         expected = [
@@ -39,6 +42,13 @@ class VisualQualitySourceTests(unittest.TestCase):
         self.assertIn("from aiortc.contrib.media import MediaRecorder", self.benchmark)
         self.assertIn('run.add_argument(\n        "--record-media"', self.benchmark)
         self.assertIn("await self.recorder.stop()", self.benchmark)
+
+    def test_quality_profiles_separate_runtime_from_stride_one(self) -> None:
+        self.assertIn("QUALITY_BENCHMARK_PROFILE:-runtime", self.quality_runner)
+        self.assertIn("render_stride=2", self.quality_runner)
+        self.assertIn("incremental_windows=true", self.quality_runner)
+        self.assertIn("render_stride=1", self.quality_runner)
+        self.assertIn("incremental_windows=false", self.quality_runner)
 
 
 if __name__ == "__main__":

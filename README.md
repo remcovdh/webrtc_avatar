@@ -1,6 +1,47 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2n1-av-sync-gate`
+Current build: `neural-avatar-v2n2-1-build-fixture-fix`
+
+## v2N.2.1 Docker build-fixture correction
+
+v2N.2 added a regression test that reads `quality_benchmark.sh`, but the first
+archive did not copy that host runner into the image-local test directory.
+v2N.2.1 adds the missing Dockerfile `COPY`. No avatar, TTS, streaming, timing,
+or benchmark-profile behavior changed.
+
+## v2N.2 real-time versus visual benchmark profiles
+
+The v2N.1 MP4 proved that the initial audio/video gate was fixed: speech and
+mouth movement both began at approximately 2.04 seconds. They then drifted
+because the quality runner forced stride 1, requiring 25 new neural frames per
+second while the measured renderer produced only about 11.5. Audio played in
+real time while video repeatedly held frames and completed each phrase later.
+
+v2N.2 separates two valid measurements:
+
+| Profile | Stride | Incremental | Purpose |
+| --- | ---: | :---: | --- |
+| `runtime` (default) | 2 with adaptive catch-up | yes | Test the deployable streaming experience and A/V synchronization. |
+| `visual` | 1 | no | Render the complete phrase first, then play synchronized full-detail media for mouth/artifact comparison. |
+
+Test the realistic streaming baseline:
+
+```bash
+QUALITY_BENCHMARK_PROFILE=runtime \
+QUALITY_BENCHMARK_SCENARIOS='baseline,all,1.0,true,false,false' \
+./quality_benchmark.sh
+```
+
+Test full-detail mouth quality without pretending stride 1 is real time:
+
+```bash
+QUALITY_BENCHMARK_PROFILE=visual \
+QUALITY_BENCHMARK_SCENARIOS='baseline,all,1.0,true,false,false;lip-115,lip,1.15,true,false,false' \
+./quality_benchmark.sh
+```
+
+Result directories end in `-runtime` or `-visual`, preventing unlike profiles
+from being mistaken for the same experiment.
 
 ## v2N.1 incremental A/V synchronization gate
 
@@ -234,7 +275,7 @@ Expected Chatterbox fields include:
 
 ```json
 {
-  "server_build": "neural-avatar-v2n1-av-sync-gate",
+  "server_build": "neural-avatar-v2n2-1-build-fixture-fix",
   "tts_provider": "chatterbox",
   "tts_ready": true
 }

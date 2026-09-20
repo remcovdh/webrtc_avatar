@@ -144,9 +144,11 @@ RUN python -m py_compile /workspace/patch_warping_onnx.py \
 
 COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py /workspace/FasterLivePortrait/
 # test_tts_provider.py validates the Compose-level provider switch as well as
-# the Python adapter. Include the manifest in the build-test fixture so the
-# same test works both from the source tree and inside the image build.
+# the Python adapter, while test_visual_quality.py validates the host quality
+# runner. Include both fixtures so the same tests work in the source tree and
+# inside the image build.
 COPY docker-compose.yml /workspace/FasterLivePortrait/docker-compose.yml
+COPY quality_benchmark.sh /workspace/FasterLivePortrait/quality_benchmark.sh
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
