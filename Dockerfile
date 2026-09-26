@@ -93,8 +93,14 @@ CMD ["python", "/workspace/listener_worker.py"]
 FROM common AS conductor
 
 WORKDIR /workspace
-COPY conversation_protocol.py listener_protocol.py conductor.py forget.py test_conductor.py /workspace/
-RUN python -m unittest -v test_conductor.py
+# System 1 (M3): Laya typed decisions (model downloaded at first start into the
+# mounted cache) plus classical CPU topic extraction with small spaCy models.
+RUN python -m pip install "laya==0.3.20" "spacy==3.8.16" "yake==0.7.3" "rapidfuzz==3.14.6" \
+      "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
+      "nl_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl"
+COPY conversation_protocol.py listener_protocol.py conductor.py forget.py system1.py test_conductor.py test_system1.py /workspace/
+COPY config/system1.json /workspace/config/system1.json
+RUN python -m unittest -v test_conductor.py test_system1.py
 CMD ["python", "/workspace/conductor.py"]
 
 

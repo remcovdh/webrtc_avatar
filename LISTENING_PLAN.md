@@ -76,3 +76,16 @@ Each milestone is its own version with its own explanation and commit.
   after the final text (no punctuation: 700 - 300 ms), avatar starts replying
   1.4 s later. Every turn is a JSON line in `results/conversations/`; audio is
   opt-in (`LISTENER_SAVE_AUDIO=true`); `forget.py` deletes logs.
+- **M3 done (v2U, 2026-09-26).** The user tested it: works OK; the turn
+  sometimes ends a little too early (backlog). `system1.py` behind the
+  `System1` interface; the conductor's `System1Responder` picks an English
+  reaction per decision. Measured zero-shot on 16 Dutch/English utterances:
+  intent 11/16, emotion 4-9/16 depending on option order (a strong bias to
+  "surprised"), Laya's own "needs an answer" yes/no unusable (0.15-0.23 for real
+  questions), so System 2 is chosen by intent. Laya multilingual runs on the
+  CPU (124 ms median, 0 GB GPU); decisions take ~230-280 ms including spaCy
+  topics. Laya's `detect_language` was unreliable on short Dutch sentences, so
+  the page's language choice is used ("Automatic" falls back to a word guess).
+  Keyword rules are limited to short utterances (`max_words`), after "Hallo,
+  ... kun je me vertellen wat een ballon is?" was wrongly taken as a greeting.
+  Corrections from the page apply at once (verified end to end).

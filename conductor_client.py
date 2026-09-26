@@ -28,6 +28,7 @@ class ConductorClient:
         self._task: asyncio.Task | None = None
         self._closed = False
         self._speaking = False
+        self._language: str | None = None
 
     @property
     def connected(self) -> bool:
@@ -48,6 +49,8 @@ class ConductorClient:
             LOG.info("Connected to the conductor at %s", self.socket_path)
             # A (re)started conductor must know whether the avatar is talking.
             await self._send({"type": "avatar_speaking", "speaking": self._speaking})
+            if self._language is not None:
+                await self._send({"type": "language", "language": self._language})
             try:
                 while True:
                     kind, payload = await read_frame(reader)
@@ -86,6 +89,13 @@ class ConductorClient:
 
     async def on_push_to_talk(self, pressed: bool) -> None:
         await self._send({"type": "push_to_talk", "pressed": pressed})
+
+    async def on_language(self, language: str) -> None:
+        self._language = language
+        await self._send({"type": "language", "language": language})
+
+    async def on_correction(self, correction: dict[str, Any]) -> None:
+        await self._send({"type": "correction", **correction})
 
     async def close(self) -> None:
         self._closed = True

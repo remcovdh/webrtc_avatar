@@ -1,6 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2t-conductor`
+Current build: `neural-avatar-v2u-system1`
+
+## v2U System 1 reactions
+
+Build `neural-avatar-v2u-system1` reacts to what you say with a fitting English phrase (System 1:
+Laya + keywords + topic extraction). The page shows each decision; change the
+intent or emotion there to correct it, which applies at once. Edit classes and
+phrases in `config/system1.json` (no restart needed).
 
 ## v2T conversation turns
 

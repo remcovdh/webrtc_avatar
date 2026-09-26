@@ -5,10 +5,10 @@ Runs as its own process. The avatar process connects over a Unix socket
 events, its speaking state and push-to-talk, and receives `say` / `show`
 commands back.
 
-M2 behaviour: decide when the user's turn is over (half-duplex, silence
-thresholds that depend on how the sentence ends, push-to-talk, primary
-speaker), log every turn, and reply by repeating what was heard. System 1
-(M3) and System 2 (M4) replace the reply policy behind `Responder`.
+It decides when the user's turn is over (half-duplex, silence thresholds that
+depend on how the sentence ends, push-to-talk, primary speaker), logs every
+turn, and asks a `Responder` for the reply: System 1 (M3, `system1.py`) or the
+M2 echo. System 2 (M4) plugs in behind the same interface.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ TURN_CONNECTIVE_MS = int(os.getenv("TURN_CONNECTIVE_MS", "1200"))
 LISTENER_SILENCE_MS = int(os.getenv("LISTENER_MIN_SILENCE_MS", "300"))
 # Push-to-talk: how long to wait for the last utterance's final text.
 PTT_FINAL_WAIT_MS = int(os.getenv("PTT_FINAL_WAIT_MS", "1500"))
+RESPONDER = os.getenv("CONDUCTOR_RESPONDER", "system1").strip().lower()
 CONNECTIVES = {
     word.strip().lower()
     for word in os.getenv(
@@ -191,15 +192,45 @@ class TurnTaker:
 
 
 class Responder(Protocol):
-    def reply(self, turn: Turn) -> str | None: ...
+    def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
+        """The avatar's reply (or None) and details for the log and the page.
+        Blocking is fine: the conductor calls it in a worker thread."""
+        ...
+
+    def correct(self, text: str, fields: dict[str, str]) -> None:
+        """A correction from the page for a sentence the responder judged."""
+        ...
 
 
 class EchoResponder:
     """M2: prove the loop by repeating what was heard."""
 
-    def reply(self, turn: Turn) -> str | None:
-        return f"You said: {turn.text}"
+    def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
+        return f"You said: {turn.text}", {}
 
+    def correct(self, text: str, fields: dict[str, str]) -> None:
+        pass
+
+
+class System1Responder:
+    """M3: react with a phrase chosen from System 1's typed decision."""
+
+    def __init__(self) -> None:
+        from system1 import LayaSystem1, Reactions
+
+        self.system1 = LayaSystem1()
+        self.system1.warm_up()
+        self.reactions = Reactions(self.system1.config)
+
+    def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
+        decision = self.system1.decide(turn.text, language)
+        return self.reactions.pick(decision), {
+            "decision": decision.to_dict(),
+            "options": self.system1.options(),
+        }
+
+    def correct(self, text: str, fields: dict[str, str]) -> None:
+        self.system1.correct(text, fields)
 
 # ---------------------------------------------------------------------------
 # Conversation log (local JSON lines, one per turn)
@@ -228,6 +259,7 @@ class Session:
         self.turns = TurnTaker()
         self.log = ConversationLog(LOG_DIR, self.id)
         self.turn_count = 0
+        self.language = "en-US"  # the page's listening language
         self._state = ""
 
     async def handle(self, message: dict[str, Any]) -> None:
@@ -247,7 +279,22 @@ class Session:
             self.turns.on_avatar_speaking(bool(message.get("speaking")))
         elif kind == "push_to_talk":
             self.turns.on_push_to_talk(bool(message.get("pressed")))
+        elif kind == "language":
+            self.language = str(message.get("language") or "en-US")
+        elif kind == "correction":
+            await self._correct(message)
         await self._update_state()
+
+    async def _correct(self, message: dict[str, Any]) -> None:
+        text = str(message.get("text", ""))
+        fields = {k: str(v) for k, v in (message.get("fields") or {}).items()}
+        await asyncio.to_thread(self.responder.correct, text, fields)
+        self.log.write({
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "session": self.id,
+            "correction": {"turn": message.get("turn"), "text": text, "fields": fields},
+        })
+        await self.send({"type": "show", "state": {"corrected": {"turn": message.get("turn"), "fields": fields}}})
 
     async def tick(self) -> None:
         turn = self.turns.poll()
@@ -258,12 +305,18 @@ class Session:
     async def _respond(self, turn: Turn) -> None:
         self.turn_count += 1
         started = time.perf_counter()
-        reply = self.responder.reply(turn)
+        try:
+            reply, detail = await asyncio.to_thread(self.responder.reply, turn, self.language)
+        except Exception:
+            LOG.exception("Responder failed; staying silent this turn")
+            reply, detail = None, {"error": "responder failed"}
         record = {
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "session": self.id,
             "turn": self.turn_count,
+            "language": self.language,
             **asdict(turn),
+            **detail,
             "reply": reply,
             "reply_ms": round((time.perf_counter() - started) * 1000, 1),
         }
@@ -336,7 +389,9 @@ def main() -> None:
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(serve(EchoResponder))
+    # One responder for all sessions: its models load once.
+    responder = System1Responder() if RESPONDER == "system1" else EchoResponder()
+    asyncio.run(serve(lambda: responder))
 
 
 if __name__ == "__main__":

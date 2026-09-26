@@ -32,6 +32,14 @@ class Conductor(Protocol):
 
     async def on_push_to_talk(self, pressed: bool) -> None: ...
 
+    async def on_language(self, language: str) -> None:
+        """The page's listening language ("en-US", "nl-NL", "auto")."""
+        ...
+
+    async def on_correction(self, correction: dict[str, Any]) -> None:
+        """The user corrected System 1: {"turn", "text", "fields": {...}}."""
+        ...
+
     async def close(self) -> None: ...
 
 

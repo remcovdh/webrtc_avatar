@@ -56,7 +56,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2t-conductor"
+SERVER_BUILD = "neural-avatar-v2u-system1"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -2339,7 +2339,18 @@ async def offer(request: Request) -> JSONResponse:
                     run_job(conductor.on_push_to_talk(bool(payload.get("pressed"))))
                 return
 
+            if payload.get("type") == "correction":
+                if conductor is not None:
+                    run_job(conductor.on_correction({
+                        "turn": payload.get("turn"),
+                        "text": str(payload.get("text", "")),
+                        "fields": payload.get("fields") or {},
+                    }))
+                return
+
             if payload.get("type") == "listen_language":
+                if conductor is not None:
+                    run_job(conductor.on_language(str(payload.get("language", ""))))
                 if listener is not None:
                     task = asyncio.create_task(
                         listener.set_language(str(payload.get("language", "")))

@@ -1,3 +1,21 @@
+# neural-avatar-v2u-system1
+
+## v2U System 1 reactions (milestone M3 of `LISTENING_PLAN.md`)
+
+- `system1.py` behind the `System1` interface: Laya multilingual (on the CPU,
+  ~120 ms) decides intent and emotion; keyword rules on the ASR text (short
+  utterances only) and a correction memory (Laya embeddings, cosine >= 0.9)
+  override it. spaCy + YAKE + rapidfuzz pick the topic, with the page's
+  language choice. Questions and requests are marked for System 2.
+- The conductor's `System1Responder` answers with an English phrase per
+  intent (+emotion), naming the topic where possible.
+- The page shows each decision with intent/emotion dropdowns; a correction is
+  stored in `results/system1/corrections.jsonl` and applies at once.
+- Classes, criteria, keyword rules, watch words and phrases live in
+  `config/system1.json`, re-read on change.
+- Measured: zero-shot intent 11/16, emotion weak (bias to "surprised", so
+  low-confidence emotions become "neutral"); a decision takes ~230-280 ms.
+
 # neural-avatar-v2t-conductor
 
 ## v2T conductor and turn-taking (milestone M2 of `LISTENING_PLAN.md`)

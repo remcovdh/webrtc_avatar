@@ -46,6 +46,11 @@
     #transcript { max-height:180px; overflow:auto; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:#0d1015; font-size:13px; display:grid; gap:5px; }
     #transcript .line.partial { color:var(--muted); font-style:italic; }
     #transcript .line.echo { opacity:.5; }
+    #decision { display:grid; gap:6px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:#0d1015; font-size:12px; color:#cdd3da; }
+    #decision[hidden] { display:none; }
+    #decision .row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+    #decision select { width:auto; padding:4px 6px; font-size:12px; }
+    #decision .muted { color:var(--muted); }
     #transcript .spk { display:inline-block; min-width:38px; margin-right:6px; color:var(--accent); font-size:11px; font-weight:700; }
     @media (max-width:760px) { main { grid-template-columns:1fr; max-width:512px; } }
   </style>
@@ -80,6 +85,7 @@
           <div class="meter" aria-hidden="true"><span id="micLevel"></span></div>
         </div>
         <div class="details" id="conversationState">Conversation: not connected</div>
+        <div id="decision" hidden aria-live="polite"></div>
         <div id="transcript" aria-live="polite"><div class="details" id="listenHint">Listening is off</div></div>
       </section>
       <section class="metrics" aria-label="Progressive phrase timings">
@@ -121,7 +127,53 @@
     const conversationState = document.querySelector("#conversationState");
     const conversation = { turn_state:"listening", primary_speaker:null, logging:false, session:null };
     const turnLabels = { listening:"listening", user_speaking:"you are speaking", push_to_talk:"push-to-talk", avatar_speaking:"avatar speaking" };
+    const decisionBox = document.querySelector("#decision");
+    // System 1's decision for the last turn; changing a class sends a
+    // correction that applies to similar sentences at once.
+    function showDecision(turn) {
+      const d = turn.decision;
+      if (!d) { decisionBox.hidden = true; return; }
+      decisionBox.hidden = false;
+      decisionBox.innerHTML = "";
+      const heard = document.createElement("div");
+      heard.className = "muted";
+      heard.textContent = `Turn ${turn.turn} · heard (${d.language}): “${d.text}”`;
+      const row = document.createElement("div");
+      row.className = "row";
+      for (const field of ["intent", "emotion"]) {
+        const select = document.createElement("select");
+        select.setAttribute("aria-label", `Correct ${field}`);
+        for (const option of turn.options?.[field] || [d[field]]) {
+          const item = new Option(option, option, false, option === d[field]);
+          select.appendChild(item);
+        }
+        select.title = `source: ${d.sources?.[field] || "?"} · confidence ${d.confidence?.[field] ?? "?"}`;
+        select.addEventListener("change", () => {
+          channel?.send(JSON.stringify({ type:"correction", turn:turn.turn, text:d.text, fields:{ [field]:select.value } }));
+        });
+        const label = document.createElement("span");
+        label.className = "muted";
+        label.textContent = `${field}:`;
+        row.append(label, select);
+      }
+      const facts = document.createElement("span");
+      facts.className = "muted";
+      facts.textContent = `topic: ${d.topic || "–"} · System 2: ${d.needs_system2 ? "yes" : "no"} · ${d.latency_ms} ms`;
+      row.appendChild(facts);
+      const reply = document.createElement("div");
+      reply.textContent = `Reply: ${turn.reply || "(none)"}`;
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.id = "correctionNote";
+      note.textContent = `Sources: intent ${d.sources?.intent}, emotion ${d.sources?.emotion}. Change a class to correct it.`;
+      decisionBox.append(heard, row, reply, note);
+    }
     function showConversation(message) {
+      if (message.turn) showDecision(message.turn);
+      if (message.corrected) {
+        const note = document.querySelector("#correctionNote");
+        if (note) note.textContent = `Saved: ${JSON.stringify(message.corrected.fields)} applies to similar sentences from now on.`;
+      }
       Object.assign(conversation, message);
       const parts = [`Turn: ${turnLabels[conversation.turn_state] || conversation.turn_state}`];
       if (conversation.primary_speaker) parts.push(`answering ${conversation.primary_speaker}`);

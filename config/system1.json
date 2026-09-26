@@ -1,0 +1,59 @@
+{
+  "_comment": "System 1 classes and reactions. Edits take effect on the next turn, no restart needed. Criteria are Laya's zero-shot descriptions; order matters a little (the first measured emotion order made almost everything 'surprised').",
+
+  "intents": {
+    "question": "asks a question or wants information or an explanation",
+    "request": "asks the assistant to do or tell something (other than stop)",
+    "remark": "shares a statement, opinion or observation without asking anything",
+    "greeting": "says hello or opens the conversation",
+    "farewell": "says goodbye or ends the conversation",
+    "thanks": "thanks the assistant",
+    "agreement": "agrees, confirms or says yes",
+    "disagreement": "disagrees, corrects the assistant or says no",
+    "stop": "tells the assistant to stop, be quiet or wait"
+  },
+
+  "emotions": {
+    "surprised": "surprised, astonished",
+    "angry": "annoyed, irritated, frustrated",
+    "sad": "sad, disappointed, worried",
+    "joyful": "happy, enthusiastic, amused, positive",
+    "neutral": "calm, matter-of-fact, no particular emotion"
+  },
+
+  "_keyword_rules": "Words heard by the ASR that decide a field outright (whole words, case-insensitive). max_words limits a rule to short utterances, so 'Hallo, kun je me vertellen...' stays a question. The correction memory still wins over these rules.",
+  "keyword_rules": [
+    {"words": ["stop", "wacht even", "hou op", "be quiet", "shut up", "hold on"], "intent": "stop", "max_words": 8},
+    {"words": ["thank you", "thanks", "dank je", "dankjewel", "bedankt"], "intent": "thanks", "max_words": 6},
+    {"words": ["goodbye", "bye", "see you", "tot ziens", "doei", "dag dag"], "intent": "farewell", "max_words": 6},
+    {"words": ["hello", "hi there", "good morning", "hallo", "goedemorgen", "goedemiddag"], "intent": "greeting", "max_words": 6}
+  ],
+
+  "_system2_intents": "Intents that need a real answer from System 2 (M4); until then the avatar says it cannot answer yet.",
+  "system2_intents": ["question", "request"],
+
+  "_watch_words": "Words that should always become the topic when heard (fuzzy-matched to tolerate ASR spelling).",
+  "watch_words": ["Devoteam", "avatar", "Laya", "TensorRT"],
+
+  "memory_similarity": 0.9,
+  "_min_emotion_confidence": "Below this Laya confidence the emotion becomes 'neutral' (zero-shot emotions were often wrong).",
+  "min_emotion_confidence": 0.6,
+
+  "_reactions": "English phrases per intent; 'intent+emotion' keys win when both match. {topic} is replaced by the topic: when there is a topic, phrases with {topic} are preferred; without one they are skipped. One phrase is picked in rotation.",
+  "reactions": {
+    "greeting": ["Hello! Nice to hear from you.", "Hi there, good to see you."],
+    "farewell": ["Goodbye, talk to you soon!", "See you later!"],
+    "thanks": ["You're welcome!", "Glad I could help."],
+    "agreement": ["Great, then we agree.", "Good."],
+    "disagreement": ["Oh, I see. Tell me what I got wrong.", "Fair enough, let me reconsider."],
+    "disagreement+angry": ["Sorry about that. What should I do differently?"],
+    "stop": ["Okay, I'll stop.", "Sure, I'll wait."],
+    "remark": ["I see.", "Interesting, tell me more about {topic}.", "Hmm, interesting."],
+    "remark+joyful": ["Glad you like it!", "That's great to hear."],
+    "remark+angry": ["Sorry about that. I'll try to do better."],
+    "remark+sad": ["I'm sorry to hear that."],
+    "remark+surprised": ["Surprising, isn't it?"],
+    "question": ["Good question about {topic}. I can't look that up yet, but soon I can.", "Good question. I can't answer that yet, but soon I can."],
+    "request": ["I'd like to help with {topic}, but I can't look that up yet.", "I can't do that yet, but soon I can."]
+  }
+}

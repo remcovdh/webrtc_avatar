@@ -44,6 +44,7 @@ results/claude-review-images/
 results/motion-dumps/
 results/listener-test/
 results/conversations/
+results/system1/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

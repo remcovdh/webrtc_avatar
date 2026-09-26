@@ -97,6 +97,16 @@ Later:
 - **Proper certificates** (e.g. a reverse proxy with Let's Encrypt) when the
   avatar runs somewhere reachable by others.
 
+## Conversation tuning
+
+- **Turn ends a little too early sometimes** (user, M3). Knobs:
+  `TURN_SILENCE_MS` (700), `TURN_END_PUNCTUATION_MS` (400),
+  `TURN_CONNECTIVE_MS` (1200) and `LISTENER_MIN_SILENCE_MS` (300) in
+  docker-compose; consider a semantic end-of-turn check (is the sentence
+  complete?) with System 1 on the partial text.
+- **System 1 accuracy**: zero-shot intent 11/16, emotion weak; corrections and
+  the nightly fine-tuning (M5) are meant to fix this.
+
 ## Avatar quality
 
 - JoyVASA's mouth follows individual syllables only loosely (correlation with

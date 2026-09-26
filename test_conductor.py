@@ -112,7 +112,7 @@ class DataTests(unittest.TestCase):
         import forget
 
         turn = conductor.Turn("Hallo", "spk0", [1], "silence")
-        self.assertEqual(EchoResponder().reply(turn), "You said: Hallo")
+        self.assertEqual(EchoResponder().reply(turn, "nl-NL"), ("You said: Hallo", {}))
 
         folder = Path(tempfile.mkdtemp())
         (folder / "audio").mkdir()

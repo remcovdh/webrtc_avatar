@@ -96,9 +96,19 @@ services:
       TURN_SILENCE_MS: "${TURN_SILENCE_MS:-700}"
       TURN_CONNECTIVE_MS: "${TURN_CONNECTIVE_MS:-1200}"
       LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
+      # M3: System 1 (Laya on the CPU, classes and reactions in
+      # config/system1.json, corrections in results/system1/). "echo" = M2.
+      CONDUCTOR_RESPONDER: "${CONDUCTOR_RESPONDER:-system1}"
+      SYSTEM1_CONFIG: /workspace/config/system1.json
+      SYSTEM1_MEMORY: /workspace/results/system1/corrections.jsonl
+      SYSTEM1_DEVICE: "${SYSTEM1_DEVICE:-cpu}"
     volumes:
       - avatar-run:/run/avatar
       - ./results:/workspace/results
+      # Folder mount (not the file) so editors that replace the file still
+      # reach the running conductor, which re-reads it on change.
+      - ./config:/workspace/config:ro
+      - ./models/hf-conductor:/root/.cache/huggingface
     restart: unless-stopped
 
   webrtc-avatar:
