@@ -72,6 +72,7 @@
           </table>
         </div>
       </section>
+      <div class="details" id="syncDetails">Browser A/V buffers appear once media flows</div>
       <div class="details" id="runtimeDetails">The first phrase plays as soon as it is ready while later phrases are generated.</div>
     </section>
   </main>
@@ -88,6 +89,8 @@
     const timingRows = document.querySelector("#timingRows");
     const timingSummary = document.querySelector("#timingSummary");
     const runtimeDetails = document.querySelector("#runtimeDetails");
+    const syncDetails = document.querySelector("#syncDetails");
+    let serverLipOffsetMs = 0;
     let voiceModes = [];
     let pc, channel;
     const stream = new MediaStream();
@@ -168,6 +171,28 @@
       if (!voiceModeInput.value) voiceModeInput.value = "design";
       updateVoiceControls();
     }
+    // How long the browser holds each track before playout, from the change in
+    // WebRTC jitter-buffer stats over the last second. When the tracks share
+    // one stream the browser delays the earlier one to line them up.
+    const lastJitter = {};
+    async function updateSyncDetails() {
+      if (!pc || pc.connectionState !== "connected") return;
+      const delays = {};
+      (await pc.getStats()).forEach(report => {
+        if (report.type !== "inbound-rtp" || !("jitterBufferDelay" in report)) return;
+        const previous = lastJitter[report.kind] || { delay:0, count:0 };
+        const count = report.jitterBufferEmittedCount - previous.count;
+        if (count > 0) delays[report.kind] = (report.jitterBufferDelay - previous.delay) / count * 1000;
+        lastJitter[report.kind] = { delay:report.jitterBufferDelay, count:report.jitterBufferEmittedCount };
+      });
+      if (delays.audio == null || delays.video == null) return;
+      const lead = delays.audio - delays.video;
+      syncDetails.textContent = `Browser buffers: audio ${delays.audio.toFixed(0)} ms · video ${delays.video.toFixed(0)} ms`
+        + ` · ${lead >= 0 ? "video shown" : "audio heard"} ${Math.abs(lead).toFixed(0)} ms earlier`
+        + ` · server lip offset ${serverLipOffsetMs} ms`;
+    }
+    setInterval(() => updateSyncDetails().catch(() => {}), 1000);
+
     async function waitForIceGathering(peer) {
       if (peer.iceGatheringState === "complete") return;
       await new Promise(resolve => {
@@ -201,6 +226,7 @@
           ? `${healthBody.render_window_frames || 8}-frame windows`
           : "phrase-batch frames";
         runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · TTS ${healthBody.tts_provider || "unknown"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
+        serverLipOffsetMs = Number(healthBody.lip_sync_offset_ms || 0);
         const config = await fetch("/client-config").then(response => response.json());
         configureVoiceModes(config);
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });

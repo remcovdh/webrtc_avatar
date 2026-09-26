@@ -1,6 +1,22 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2p-tensorrt-fp16`
+Current build: `neural-avatar-v2q-realtime-baseline`
+
+## v2Q real-time baseline
+
+Build `neural-avatar-v2q-realtime-baseline` is the first real-time baseline: speech starts ~0.9 s after
+sending, phrases play without pauses, and the mouth stays in sync. The main
+bottleneck, FasterLivePortrait's `warping_spade` generator, now runs with
+TensorRT FP16 (27 ms instead of 97 ms per frame).
+
+**Read [`REALTIME_BASELINE.md`](REALTIME_BASELINE.md)** for what was changed
+and why: TensorRT, the audio clock, the speech start gate, the facial motion
+corrections, browser lip-sync and the tools used to measure them.
+
+```bash
+docker compose build && docker compose up -d   # first start builds TensorRT engines (~30 s)
+# open http://localhost:8000/
+```
 
 ## v2P TensorRT FP16 face rendering
 

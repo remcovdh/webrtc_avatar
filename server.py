@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import time
+import uuid
 import wave
 from collections import deque
 from contextlib import asynccontextmanager
@@ -48,7 +49,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2p-tensorrt-fp16"
+SERVER_BUILD = "neural-avatar-v2q-realtime-baseline"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -200,6 +201,11 @@ if not 0.0 <= AVATAR_HEAD_MOTION_SCALE <= 1.5:
 AVATAR_LIP_MOTION_MODE = os.getenv("AVATAR_LIP_MOTION_MODE", "absolute").strip().lower()
 if AVATAR_LIP_MOTION_MODE not in {"absolute", "relative"}:
     raise ValueError("AVATAR_LIP_MOTION_MODE must be absolute or relative")
+# Shifts the video against the audio clock: positive shows the mouth later.
+# JoyVASA's mouth leads the loudness by ~40-160 ms (median ~80 ms).
+AVATAR_LIP_SYNC_OFFSET_MS = float(os.getenv("AVATAR_LIP_SYNC_OFFSET_MS", "0"))
+if not -500.0 <= AVATAR_LIP_SYNC_OFFSET_MS <= 500.0:
+    raise ValueError("AVATAR_LIP_SYNC_OFFSET_MS must be between -500 and 500")
 # FasterLivePortrait's own "eyes" and "lip" animation-region keypoints.
 EYE_EXPRESSION_INDICES = [11, 13, 15, 16, 18]
 LIP_EXPRESSION_INDICES = [6, 12, 14, 17, 19, 20]
@@ -720,7 +726,7 @@ class PlaybackBuffer:
         self.producing = False
 
     def next_video(self) -> np.ndarray:
-        playhead = self.playhead_seconds
+        playhead = self.playhead_seconds - AVATAR_LIP_SYNC_OFFSET_MS / 1000
         # Skip frames whose moment in the audio has already passed.
         while len(self.video) > 1 and self.video[1][0] <= playhead:
             self.video.popleft()
@@ -2047,6 +2053,7 @@ async def health() -> JSONResponse:
         "lip_motion_scale": AVATAR_LIP_MOTION_SCALE,
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
+        "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
         "warping_backend": warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
         "speech_start_safety": SPEECH_START_SAFETY,
@@ -2215,8 +2222,11 @@ async def offer(request: Request) -> JSONResponse:
     await pc.setRemoteDescription(
         RTCSessionDescription(sdp=params["sdp"], type=params["type"])
     )
-    pc.addTrack(AvatarVideoTrack(playback))
-    pc.addTrack(AvatarAudioTrack(playback))
+    # aiortc gives every sender its own random msid stream, and browsers only
+    # lip-sync (via RTCP sender reports) tracks that share one stream.
+    stream_id = str(uuid.uuid4())
+    for track in (AvatarVideoTrack(playback), AvatarAudioTrack(playback)):
+        pc.addTrack(track)._stream_id = stream_id
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
     return JSONResponse(

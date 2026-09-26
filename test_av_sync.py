@@ -82,6 +82,22 @@ class AudioClockedVideoTests(unittest.TestCase):
         self.assertEqual(int(playback.next_video()[0, 0, 0]), 100)
 
 
+    def test_lip_sync_offset_shows_the_mouth_later(self) -> None:
+        original = server.AVATAR_LIP_SYNC_OFFSET_MS
+        try:
+            server.AVATAR_LIP_SYNC_OFFSET_MS = 200.0
+            playback = PlaybackBuffer()
+            playback.begin()
+            playback.begin_phrase_stream(pcm(1.0), RENDER_FPS, 13)
+            playback.append_video_window(numbered_frames(0, 13))
+            play_audio(playback, 0.62)
+            # 0.62 s of audio with the mouth 0.2 s later shows the 0.42 s
+            # moment: render frame 5 (12.5 fps).
+            self.assertEqual(int(playback.next_video()[0, 0, 0]), 5)
+        finally:
+            server.AVATAR_LIP_SYNC_OFFSET_MS = original
+
+
 class SpeechStartGateTests(unittest.TestCase):
     def test_slow_render_holds_speech_until_enough_video_exists(self) -> None:
         playback = PlaybackBuffer()

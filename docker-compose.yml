@@ -85,11 +85,13 @@ services:
       RENDER_WINDOW_FRAMES: "${AVATAR_RENDER_WINDOW_FRAMES:-8}"
       # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
       # rendered frame for the skipped interval. Set 1 for full v2B quality.
-      RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-2}"
-      # v2F keeps stride 2 for the first phrase / a healthy queue and switches
-      # to stride 3 when less than 0.75 seconds remains buffered.
+      # v2Q: TensorRT renders 23-35 FPS, so stride 1 (all 25 motion FPS) is
+      # the default; the catch-up stride 2 keeps motion smooth when it dips.
+      RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-1}"
+      # v2F keeps RENDER_STRIDE for the first phrase / a healthy queue and
+      # switches to CATCHUP_RENDER_STRIDE when less than 0.75 s remains buffered.
       ADAPTIVE_RENDER_STRIDE: "${AVATAR_ADAPTIVE_RENDER_STRIDE:-true}"
-      CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-3}"
+      CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-2}"
       CATCHUP_BUFFER_SECONDS: "${AVATAR_CATCHUP_BUFFER_SECONDS:-0.75}"
       # FLP renders below real time here, so each phrase's speech waits until
       # duration * (1 - render speed) * safety seconds of video exist. The
@@ -125,6 +127,10 @@ services:
       # At 1.0 the head drifted 1-5 degrees up and rolled, so the avatar
       # looked above the camera; 0.3 keeps small nods but a level gaze.
       AVATAR_HEAD_MOTION_SCALE: "${AVATAR_HEAD_MOTION_SCALE:-0.3}"
+      # Shift the mouth against the voice: positive shows it later. JoyVASA's
+      # mouth leads the loudness by ~40-160 ms; +80 felt right in the browser
+      # and made the browser's audio/video buffers nearly equal (53/66 ms).
+      AVATAR_LIP_SYNC_OFFSET_MS: "${AVATAR_LIP_SYNC_OFFSET_MS:-80}"
       # How JoyVASA's mouth reaches the portrait. `absolute` uses its mouth
       # shapes directly (eyes and head stay relative); `relative` applied its
       # change since the first frame, which pressed this portrait's lips shut.

@@ -1,3 +1,20 @@
+# neural-avatar-v2q-realtime-baseline
+
+## v2Q real-time baseline
+
+First build that starts speaking in ~0.9 s, plays phrases without pauses, keeps
+the mouth in sync and looks natural. See `REALTIME_BASELINE.md`.
+
+- Audio and video share one WebRTC stream id, so browsers synchronise them
+  with RTCP sender reports (aiortc gave each track its own random stream).
+- `AVATAR_LIP_SYNC_OFFSET_MS=80` (default) shows the mouth 80 ms later; JoyVASA's
+  mouth leads the voice by 40-160 ms. Browser buffers went from 34/290 ms
+  (audio/video) to 53/66 ms.
+- Stride 1 (all 25 motion FPS) is the default, with catch-up stride 2.
+- The page shows the browser's live audio/video jitter-buffer delays.
+- `lip_sync_analysis.py` measures JoyVASA's mouth lead/lag per dumped phrase.
+- `REALTIME_BASELINE.md` explains all changes since v2N.2, including TensorRT.
+
 # neural-avatar-v2p-tensorrt-fp16
 
 ## v2P TensorRT FP16 face rendering
