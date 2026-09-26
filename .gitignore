@@ -39,6 +39,9 @@ datasets/
 results/benchmarks/
 results/breeze-benchmarks/
 results/quality-benchmarks/
+results/claude-review/
+results/claude-review-images/
+results/motion-dumps/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

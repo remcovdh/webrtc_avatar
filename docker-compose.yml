@@ -91,6 +91,14 @@ services:
       ADAPTIVE_RENDER_STRIDE: "${AVATAR_ADAPTIVE_RENDER_STRIDE:-true}"
       CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-3}"
       CATCHUP_BUFFER_SECONDS: "${AVATAR_CATCHUP_BUFFER_SECONDS:-0.75}"
+      # FLP renders below real time here, so each phrase's speech waits until
+      # duration * (1 - render speed) * safety seconds of video exist. The
+      # mouth then stays in sync without skipping frames, at the cost of a
+      # later start. Render speed starts at EXPECTED_RENDER_FPS and is then
+      # measured. Set false for immediate starts with frame skipping.
+      SPEECH_START_GATE: "${AVATAR_SPEECH_START_GATE:-true}"
+      EXPECTED_RENDER_FPS: "${AVATAR_EXPECTED_RENDER_FPS:-9.0}"
+      SPEECH_START_SAFETY: "${AVATAR_SPEECH_START_SAFETY:-1.15}"
       # v2M waits for the first video window and a minimum playable buffer
       # before allowing one future TTS phrase onto the shared laptop GPU.
       # Set false for serial v2L scheduling; policy=eager restores the old test.
@@ -109,6 +117,23 @@ services:
       AVATAR_DRIVING_MULTIPLIER: "${AVATAR_DRIVING_MULTIPLIER:-1.0}"
       AVATAR_NORMALIZE_LIP: "${AVATAR_NORMALIZE_LIP:-true}"
       AVATAR_EYE_RETARGETING: "${AVATAR_EYE_RETARGETING:-false}"
+      # Scale of JoyVASA's generated eye motion (gaze drift and blinks):
+      # 1.0 = as generated, 0.0 = the portrait's own eyes. 0.3 removes the
+      # staring and winking seen at 1.0 while keeping some eye life.
+      AVATAR_EYE_MOTION_SCALE: "${AVATAR_EYE_MOTION_SCALE:-0.3}"
+      # Scale of JoyVASA's head rotation/translation around the first pose.
+      # At 1.0 the head drifted 1-5 degrees up and rolled, so the avatar
+      # looked above the camera; 0.3 keeps small nods but a level gaze.
+      AVATAR_HEAD_MOTION_SCALE: "${AVATAR_HEAD_MOTION_SCALE:-0.3}"
+      # How JoyVASA's mouth reaches the portrait. `absolute` uses its mouth
+      # shapes directly (eyes and head stay relative); `relative` applied its
+      # change since the first frame, which pressed this portrait's lips shut.
+      AVATAR_LIP_MOTION_MODE: "${AVATAR_LIP_MOTION_MODE:-absolute}"
+      # Relative mode only: above 1.0 opens the mouth further.
+      AVATAR_LIP_MOTION_SCALE: "${AVATAR_LIP_MOTION_SCALE:-1.0}"
+      # Optional: save every phrase's WAV and JoyVASA motion for offline
+      # analysis, e.g. /workspace/results/motion-dumps. Empty disables it.
+      AVATAR_DEBUG_DUMP_DIR: "${AVATAR_DEBUG_DUMP_DIR:-}"
       AVATAR_LIP_RETARGETING: "${AVATAR_LIP_RETARGETING:-false}"
       # Voice modes exposed in the browser:
       #   design           = reference-free voice design with CFG 4

@@ -1,6 +1,23 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2n2-1-build-fixture-fix`
+Current build: `neural-avatar-v2o-audio-clock-expression`
+
+## v2O audio-clocked playback and expression control
+
+Build `neural-avatar-v2o-audio-clock-expression` keeps the mouth in step with the voice and fixes the
+pressed-lips, staring/winking and looking-above-the-camera behaviour. See `RELEASE.md` for details.
+
+```bash
+# Defaults (docker-compose.yml)
+AVATAR_LIP_MOTION_MODE=absolute   # relative pressed the portrait's lips shut
+AVATAR_EYE_MOTION_SCALE=0.3       # 1.0 = JoyVASA eyes, 0.0 = portrait eyes
+AVATAR_HEAD_MOTION_SCALE=0.3      # 1.0 drifted the gaze above the camera
+AVATAR_SPEECH_START_GATE=true     # false = start at once, skip late frames
+
+# Record one phrase exactly as the browser receives it, plus review sheets
+./review_recording.sh "Text to speak"
+# -> results/claude-review-images/<timestamp>/{recording.mp4,closeup_*.png,...}
+```
 
 ## v2N.2.1 Docker build-fixture correction
 

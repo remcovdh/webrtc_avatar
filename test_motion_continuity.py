@@ -11,9 +11,10 @@ class MotionContinuitySourceTests(unittest.TestCase):
 
     def test_first_frame_is_gated_by_request_reset(self) -> None:
         self.assertIn(
-            "first_frame=reset_motion_reference and frame_index == 0",
+            "first_frame = reset_motion_reference and frame_index == 0",
             self.source,
         )
+        self.assertIn("first_frame=first_frame,", self.source)
 
     def test_only_first_phrase_resets_when_persistence_enabled(self) -> None:
         self.assertIn(

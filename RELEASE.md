@@ -1,3 +1,27 @@
+# neural-avatar-v2o-audio-clock-expression
+
+## v2O audio-clocked playback, speech start gate and expression control
+
+- Video frames carry their time on the audio timeline; frames the voice has
+  already passed are skipped, so the mouth can no longer drift behind speech
+  when FLP renders below real time (it lagged up to ~0.8 s per phrase).
+- Speech start gate: each phrase's speech waits until
+  `(W + (D - W) * (1 - render speed)) * 1.15` seconds of video exist, so the
+  rest arrives in time without skipped frames. Render speed is measured per
+  phrase. Costs ~1-2 s extra start latency and short pauses between phrases on
+  the RTX 5080 (~9 rendered FPS vs 12.5 needed at stride 2).
+- `AVATAR_LIP_MOTION_MODE=absolute` (default) uses JoyVASA's mouth shapes
+  directly. Relative lips pressed this closed-smile portrait's lips shut.
+- `AVATAR_EYE_MOTION_SCALE=0.3` (default) damps JoyVASA eye motion, removing
+  the staring and winking while keeping some eye life.
+- `AVATAR_HEAD_MOTION_SCALE=0.3` (default) damps JoyVASA head rotation and
+  translation around the first pose; at 1.0 pitch drifted 1-5 degrees and roll
+  up to 5 degrees, so the avatar looked above the camera.
+- `review_recording.sh` records one phrase over WebRTC and writes frame,
+  close-up and mouth/waveform sheets for visual review.
+- Optional `AVATAR_DEBUG_DUMP_DIR` saves each phrase's WAV and JoyVASA motion.
+- New metrics: `video_dropped_ms`, `speech_hold_ms`, `speech_lead_ms`.
+
 # neural-avatar-v2n2-1-build-fixture-fix
 
 ## v2N.2.1 build correction

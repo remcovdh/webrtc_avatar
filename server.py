@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import tempfile
 import time
 import wave
@@ -41,12 +42,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from omegaconf import OmegaConf
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
+from src.utils.utils import get_rotation_matrix
 from src.pipelines.joyvasa_audio_to_motion_pipeline import (
     JoyVASAAudio2MotionPipeline,
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2n2-1-build-fixture-fix"
+SERVER_BUILD = "neural-avatar-v2o-audio-clock-expression"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -128,6 +130,16 @@ CATCHUP_RENDER_STRIDE = max(
 CATCHUP_BUFFER_SECONDS = max(
     0.0, float(os.getenv("CATCHUP_BUFFER_SECONDS", "0.75"))
 )
+# FLP renders slower than real time on this GPU. Rather than letting the
+# mouth fall behind the voice (or skipping frames to catch up), hold each
+# phrase's speech until enough video is rendered that the rest arrives in time.
+SPEECH_START_GATE = _env_bool("SPEECH_START_GATE", True)
+# Initial rendered-frames-per-second estimate; replaced by measurements.
+EXPECTED_RENDER_FPS = max(0.1, float(os.getenv("EXPECTED_RENDER_FPS", "9.0")))
+SPEECH_START_SAFETY = max(1.0, float(os.getenv("SPEECH_START_SAFETY", "1.15")))
+# When set, every rendered phrase saves its WAV and JoyVASA motion here so
+# motion problems can be analysed offline.
+DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
 STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
 WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
 USE_NEURAL_IDLE_FRAME = _env_bool("USE_NEURAL_IDLE_FRAME", True)
@@ -158,6 +170,34 @@ if not 0.0 <= AVATAR_DRIVING_MULTIPLIER <= 2.0:
     raise ValueError("AVATAR_DRIVING_MULTIPLIER must be between 0.0 and 2.0")
 AVATAR_NORMALIZE_LIP = _env_bool("AVATAR_NORMALIZE_LIP", True)
 AVATAR_EYE_RETARGETING = _env_bool("AVATAR_EYE_RETARGETING", False)
+# Scales JoyVASA's eye keypoint motion relative to the utterance's first
+# frame without touching mouth, brow or head motion: 1.0 keeps the generated
+# motion, 0.0 keeps the portrait's own eyes (no gaze drift, but no blinks).
+AVATAR_EYE_MOTION_SCALE = float(os.getenv("AVATAR_EYE_MOTION_SCALE", "1.0"))
+if not 0.0 <= AVATAR_EYE_MOTION_SCALE <= 1.5:
+    raise ValueError("AVATAR_EYE_MOTION_SCALE must be between 0.0 and 1.5")
+# Scales JoyVASA's mouth keypoint motion the same way. Above 1.0 opens the
+# mouth further for the same audio without amplifying eyes or head motion.
+AVATAR_LIP_MOTION_SCALE = float(os.getenv("AVATAR_LIP_MOTION_SCALE", "1.0"))
+if not 0.0 <= AVATAR_LIP_MOTION_SCALE <= 2.0:
+    raise ValueError("AVATAR_LIP_MOTION_SCALE must be between 0.0 and 2.0")
+# Scales JoyVASA's head rotation and translation around the utterance's first
+# pose. Its pitch drifted 1-5 degrees upwards and roll up to 5 degrees during
+# speech, so the avatar looked above the camera with a tilted frame.
+AVATAR_HEAD_MOTION_SCALE = float(os.getenv("AVATAR_HEAD_MOTION_SCALE", "1.0"))
+if not 0.0 <= AVATAR_HEAD_MOTION_SCALE <= 1.5:
+    raise ValueError("AVATAR_HEAD_MOTION_SCALE must be between 0.0 and 1.5")
+# How JoyVASA's mouth keypoints reach the portrait. `relative` applies their
+# change since the utterance's first frame to the portrait's own closed-smile
+# lips, which pressed and sucked the lips in; `absolute` uses JoyVASA's mouth
+# shapes directly while eyes and head stay relative. The lip motion scale only
+# applies in relative mode.
+AVATAR_LIP_MOTION_MODE = os.getenv("AVATAR_LIP_MOTION_MODE", "absolute").strip().lower()
+if AVATAR_LIP_MOTION_MODE not in {"absolute", "relative"}:
+    raise ValueError("AVATAR_LIP_MOTION_MODE must be absolute or relative")
+# FasterLivePortrait's own "eyes" and "lip" animation-region keypoints.
+EYE_EXPRESSION_INDICES = [11, 13, 15, 16, 18]
+LIP_EXPRESSION_INDICES = [6, 12, 14, 17, 19, 20]
 AVATAR_LIP_RETARGETING = _env_bool("AVATAR_LIP_RETARGETING", False)
 MERGE_SHORT_OPENING_PHRASE = _env_bool("MERGE_SHORT_OPENING_PHRASE", True)
 PHRASE_MIN_FIRST_CHARS = max(
@@ -185,6 +225,7 @@ warmup_error: str | None = None
 tts_startup_wait_seconds: float | None = None
 idle_frame_source = "original-avatar"
 idle_frame_index: int | None = None
+render_fps_estimate = EXPECTED_RENDER_FPS
 
 VOICE_MODE_DESIGN = "design"
 VOICE_MODE_PRESET_CLONE = "preset-clone"
@@ -428,17 +469,31 @@ def _split_phrases(text: str) -> list[str]:
 
 
 class PlaybackBuffer:
-    """Per-peer playback state consumed by the two WebRTC tracks."""
+    """Per-peer playback state consumed by the two WebRTC tracks.
+
+    Audio is the master clock. Every queued video frame carries its time on the
+    audio timeline, and the video track shows the frame that matches the audio
+    already played. When rendering falls behind real time the late frames are
+    skipped rather than shown late, so the mouth never drifts after the voice.
+    """
 
     def __init__(self) -> None:
-        self.video: deque[np.ndarray] = deque()
+        self.video: deque[tuple[float, np.ndarray]] = deque()
         self.audio: deque[np.ndarray] = deque()
         self.producing = False
         self.started = False
         self.last_video = BASE_AVATAR
         self.audio_underruns = 0
         self.video_underruns = 0
+        self.video_dropped = 0
+        self.speech_holds = 0
+        self.speech_lead_seconds = 0.0
+        self._audio_queued_samples = 0
+        self._audio_played_samples = 0
+        self._speech_gate_samples = 0
+        self._speech_gate_open = True
         self._stream_fps = 0.0
+        self._stream_start = 0.0
         self._stream_source_frames = 0
         self._stream_video_emitted = 0
         self._stream_video_target = 0
@@ -455,9 +510,26 @@ class PlaybackBuffer:
         audio_seconds = len(self.audio) * AUDIO_SAMPLES / AUDIO_RATE
         return min(video_seconds, audio_seconds)
 
+    @property
+    def playhead_seconds(self) -> float:
+        return self._audio_played_samples / AUDIO_RATE
+
     def begin(self) -> None:
         self.clear()
         self.producing = True
+
+    def _queue_audio(self, pcm_48k: np.ndarray, duration: float) -> float:
+        """Queue padded audio and return its start time on the audio timeline."""
+        start = self._audio_queued_samples / AUDIO_RATE
+        required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
+        padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
+        for offset in range(0, len(padded), AUDIO_SAMPLES):
+            chunk = padded[offset : offset + AUDIO_SAMPLES]
+            if len(chunk) < AUDIO_SAMPLES:
+                chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
+            self.audio.append(chunk.reshape(1, -1))
+            self._audio_queued_samples += AUDIO_SAMPLES
+        return start
 
     def append(self, frames: list[np.ndarray], fps: float, pcm_24k: np.ndarray) -> float:
         if not frames:
@@ -470,20 +542,16 @@ class PlaybackBuffer:
         video_duration = len(frames) / fps
         duration = max(audio_duration, video_duration)
 
+        start = self._queue_audio(pcm_48k, duration)
         target_count = max(1, math.ceil(duration * VIDEO_FPS))
         video_indices = np.minimum(
             (np.arange(target_count) * fps / VIDEO_FPS).astype(int),
             len(frames) - 1,
         )
-        self.video.extend(frames[index] for index in video_indices)
-
-        required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
-        padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
-        for offset in range(0, len(padded), AUDIO_SAMPLES):
-            chunk = padded[offset : offset + AUDIO_SAMPLES]
-            if len(chunk) < AUDIO_SAMPLES:
-                chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
-            self.audio.append(chunk.reshape(1, -1))
+        self.video.extend(
+            (start + target_index / VIDEO_FPS, frames[index])
+            for target_index, index in enumerate(video_indices)
+        )
         self.started = True
         return duration
 
@@ -492,8 +560,19 @@ class PlaybackBuffer:
         pcm_24k: np.ndarray,
         fps: float,
         expected_rendered_frames: int,
+        render_rate: float | None = None,
+        window_seconds: float = 0.0,
+        safety: float = SPEECH_START_SAFETY,
     ) -> float:
-        """Queue phrase audio and initialise drift-free windowed video timing."""
+        """Queue phrase audio and initialise drift-free windowed video timing.
+
+        `render_rate` is media seconds rendered per wall-clock second. Below
+        1.0 the phrase's speech is held until enough video exists that the
+        rest arrives in time. Frames only become available a whole window
+        (`window_seconds`, W) at a time; requiring each window to be complete
+        before its first frame is due gives a lead of
+        `W + (duration - W) * (1 - rate)` seconds of video.
+        """
         if fps <= 0:
             fps = 25.0
         if expected_rendered_frames <= 0:
@@ -503,14 +582,19 @@ class PlaybackBuffer:
         audio_duration = len(pcm_48k) / AUDIO_RATE
         video_duration = expected_rendered_frames / fps
         duration = max(audio_duration, video_duration)
-        required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
-        padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
-        for offset in range(0, len(padded), AUDIO_SAMPLES):
-            chunk = padded[offset : offset + AUDIO_SAMPLES]
-            if len(chunk) < AUDIO_SAMPLES:
-                chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
-            self.audio.append(chunk.reshape(1, -1))
 
+        self._stream_start = self._queue_audio(pcm_48k, duration)
+        self._speech_gate_samples = round(self._stream_start * AUDIO_RATE)
+        window = min(window_seconds, duration)
+        self.speech_lead_seconds = (
+            min(
+                duration,
+                (window + (duration - window) * (1.0 - render_rate)) * safety,
+            )
+            if render_rate is not None and 0.0 < render_rate < 1.0
+            else 0.0
+        )
+        self._speech_gate_open = self.speech_lead_seconds <= 0.0
         self._stream_fps = fps
         self._stream_source_frames = 0
         self._stream_video_emitted = 0
@@ -518,6 +602,9 @@ class PlaybackBuffer:
         self._stream_media_duration = duration
         self._stream_last_frame = None
         return duration
+
+    def _stream_time(self, target_index: int) -> float:
+        return self._stream_start + target_index / VIDEO_FPS
 
     def append_video_window(self, frames: list[np.ndarray]) -> None:
         """Append rendered frames while preserving resampling phase per phrase."""
@@ -541,11 +628,13 @@ class PlaybackBuffer:
                 frame = self.last_video
             else:
                 frame = frames[source_index - source_start]
-            self.video.append(frame)
+            self.video.append((self._stream_time(target_index), frame))
 
         self._stream_source_frames = source_end
         self._stream_video_emitted = desired
         self._stream_last_frame = frames[-1]
+        if self._stream_video_emitted / VIDEO_FPS >= self.speech_lead_seconds:
+            self._speech_gate_open = True
         # Audio and the first video window become visible atomically from the
         # event loop's perspective, so speech never starts on the idle frame.
         self.started = True
@@ -557,13 +646,15 @@ class PlaybackBuffer:
             if tail_frame is None:
                 raise RuntimeError("Incremental renderer produced no video frames")
             self.video.extend(
-                tail_frame
-                for _ in range(
-                    self._stream_video_target - self._stream_video_emitted
+                (self._stream_time(target_index), tail_frame)
+                for target_index in range(
+                    self._stream_video_emitted, self._stream_video_target
                 )
             )
         duration = self._stream_media_duration
+        self._speech_gate_open = True
         self._stream_fps = 0.0
+        self._stream_start = 0.0
         self._stream_source_frames = 0
         self._stream_video_emitted = 0
         self._stream_video_target = 0
@@ -575,8 +666,16 @@ class PlaybackBuffer:
         self.producing = False
 
     def next_video(self) -> np.ndarray:
+        playhead = self.playhead_seconds
+        # Skip frames whose moment in the audio has already passed.
+        while len(self.video) > 1 and self.video[1][0] <= playhead:
+            self.video.popleft()
+            self.video_dropped += 1
         if self.video:
-            self.last_video = self.video.popleft()
+            frame_time, frame = self.video[0]
+            if frame_time <= playhead + 1 / VIDEO_FPS:
+                self.video.popleft()
+                self.last_video = frame
             return self.last_video
         if self.started and (self.producing or self.audio):
             if self.producing:
@@ -590,6 +689,15 @@ class PlaybackBuffer:
         # window atomically sets `started`; otherwise speech leads the mouth by
         # approximately one first-window render interval.
         if self.started and self.audio:
+            if (
+                not self._speech_gate_open
+                and self._audio_played_samples >= self._speech_gate_samples
+            ):
+                # Planned hold before a phrase; the video waits on the same
+                # clock, so both resume together once enough is rendered.
+                self.speech_holds += 1
+                return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
+            self._audio_played_samples += AUDIO_SAMPLES
             return self.audio.popleft()
         if self.started and self.producing:
             self.audio_underruns += 1
@@ -603,7 +711,15 @@ class PlaybackBuffer:
         self.last_video = BASE_AVATAR
         self.audio_underruns = 0
         self.video_underruns = 0
+        self.video_dropped = 0
+        self.speech_holds = 0
+        self.speech_lead_seconds = 0.0
+        self._audio_queued_samples = 0
+        self._audio_played_samples = 0
+        self._speech_gate_samples = 0
+        self._speech_gate_open = True
         self._stream_fps = 0.0
+        self._stream_start = 0.0
         self._stream_source_frames = 0
         self._stream_video_emitted = 0
         self._stream_video_target = 0
@@ -793,6 +909,78 @@ def _ensure_joyvasa_pipeline() -> None:
     )
 
 
+def _adjust_driving_motion(
+    motion: dict[str, Any],
+    reference: dict[str, Any] | None,
+    source_exp: np.ndarray | None = None,
+    eye_scale: float = AVATAR_EYE_MOTION_SCALE,
+    lip_scale: float = AVATAR_LIP_MOTION_SCALE,
+    lip_mode: str = AVATAR_LIP_MOTION_MODE,
+    head_scale: float = AVATAR_HEAD_MOTION_SCALE,
+) -> dict[str, Any]:
+    """Adjust JoyVASA's eyes, mouth and head before FLP applies them.
+
+    With relative motion FLP animates `source + (driving - reference)`.
+    Scaling driving values around the reference scales the change that
+    reaches the portrait; setting mouth keypoints to
+    `driving - source + reference` makes FLP produce JoyVASA's absolute mouth.
+    """
+    absolute_lips = lip_mode == "absolute" and source_exp is not None
+    if (
+        reference is None
+        or not AVATAR_RELATIVE_MOTION
+        or (
+            eye_scale == 1.0
+            and head_scale == 1.0
+            and not absolute_lips
+            and lip_scale == 1.0
+        )
+    ):
+        return motion
+    reference_exp = np.asarray(reference["exp"])
+    exp = np.array(motion["exp"], copy=True)
+    eyes, lips = EYE_EXPRESSION_INDICES, LIP_EXPRESSION_INDICES
+    exp[:, eyes, :] = reference_exp[:, eyes, :] + eye_scale * (
+        exp[:, eyes, :] - reference_exp[:, eyes, :]
+    )
+    if absolute_lips:
+        exp[:, lips, :] = (
+            exp[:, lips, :] - np.asarray(source_exp)[:, lips, :]
+            + reference_exp[:, lips, :]
+        )
+    else:
+        exp[:, lips, :] = reference_exp[:, lips, :] + lip_scale * (
+            exp[:, lips, :] - reference_exp[:, lips, :]
+        )
+    adjusted = {**motion, "exp": exp}
+    if head_scale != 1.0:
+
+        def damp(key: str) -> np.ndarray:
+            return reference[key] + head_scale * (motion[key] - reference[key])
+
+        angles = {key: damp(key) for key in ("pitch", "yaw", "roll")}
+        adjusted.update(angles, t=damp("t"))
+        adjusted["R"] = (
+            get_rotation_matrix(angles["pitch"], angles["yaw"], angles["roll"])
+            .reshape(np.shape(motion["R"]))
+            .astype(np.float32)
+        )
+    return adjusted
+
+
+def _dump_motion(wav_path: Path, motion_info: dict[str, Any]) -> None:
+    dump_dir = Path(DEBUG_DUMP_DIR)
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{time.strftime('%Y%m%dT%H%M%S')}-{time.perf_counter_ns() % 10**6:06d}"
+    shutil.copyfile(wav_path, dump_dir / f"{stem}.wav")
+    motion = motion_info["motion"]
+    np.savez_compressed(
+        dump_dir / f"{stem}.npz",
+        **{key: np.stack([frame[key] for frame in motion]) for key in motion[0]},
+        fps=float(motion_info.get("output_fps") or 25.0),
+    )
+
+
 def _render_animation_direct(
     wav_path: Path,
     render_stride: int | None = None,
@@ -817,6 +1005,8 @@ def _render_animation_direct(
     motion_started = time.perf_counter()
     motion_info = pipeline.joyvasa_pipe.gen_motion_sequence(str(wav_path))
     motion_seconds = time.perf_counter() - motion_started
+    if DEBUG_DUMP_DIR:
+        _dump_motion(wav_path, motion_info)
 
     source_fps = float(motion_info.get("output_fps") or 25.0)
     playback_fps = source_fps / selected_stride
@@ -844,6 +1034,16 @@ def _render_animation_direct(
             if lips_list is not None and frame_index < len(lips_list)
             else None
         )
+        first_frame = reset_motion_reference and frame_index == 0
+        # The first frame becomes FLP's reference itself, so it is unscaled.
+        motion = _adjust_driving_motion(
+            motion,
+            None
+            if first_frame or pipeline.R_d_0 is None
+            else pipeline.x_d_0_info,
+            # src_infos[face][0] is FLP's x_s_info for the source portrait.
+            pipeline.src_infos[0][0][0]["exp"],
+        )
         output = pipeline.run_with_pkl(
             [motion, eyes, lips],
             pipeline.src_imgs[0],
@@ -851,7 +1051,7 @@ def _render_animation_direct(
             # FasterLivePortrait stores the initial driving rotation and motion
             # reference on first_frame. Reset once per user utterance, not once
             # per phrase, so later chunks remain in the same motion space.
-            first_frame=reset_motion_reference and frame_index == 0,
+            first_frame=first_frame,
         )
         out_crop = output[0]
         if out_crop is None:
@@ -921,6 +1121,10 @@ def _render_animation_direct(
         "driving_multiplier": AVATAR_DRIVING_MULTIPLIER,
         "normalize_lip": AVATAR_NORMALIZE_LIP,
         "eye_retargeting": AVATAR_EYE_RETARGETING,
+        "eye_motion_scale": AVATAR_EYE_MOTION_SCALE,
+        "lip_motion_scale": AVATAR_LIP_MOTION_SCALE,
+        "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
+        "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_retargeting": AVATAR_LIP_RETARGETING,
         "incremental_windows": window_callback is not None,
         "window_size": RENDER_WINDOW_FRAMES if window_callback is not None else 0,
@@ -1031,6 +1235,10 @@ async def _render_phrase_in_windows(
                     pcm,
                     fps,
                     window_detail["expected_rendered_frames"],
+                    render_rate=(
+                        render_fps_estimate / fps if SPEECH_START_GATE else None
+                    ),
+                    window_seconds=RENDER_WINDOW_FRAMES / fps,
                 )
                 first_window_ms = round(
                     (time.perf_counter() - render_started) * 1000
@@ -1138,6 +1346,7 @@ async def _create_clip(
     playback: PlaybackBuffer,
     channel: Any,
 ) -> None:
+    global render_fps_estimate
     if startup_error:
         await _send_event(channel, "error", message=startup_error)
         return
@@ -1186,6 +1395,8 @@ async def _create_clip(
                 for index, phrase in enumerate(phrases, start=1):
                     underruns_before = playback.audio_underruns
                     video_underruns_before = playback.video_underruns
+                    video_dropped_before = playback.video_dropped
+                    speech_holds_before = playback.speech_holds
 
                     if tts_task is None:
                         tts_task = asyncio.create_task(
@@ -1326,12 +1537,23 @@ async def _create_clip(
                     )
                     render_seconds = time.perf_counter() - started
                     total_render += render_seconds
+                    if render_detail.get("effective_fps", 0) > 0:
+                        render_fps_estimate = (
+                            0.5 * render_fps_estimate
+                            + 0.5 * render_detail["effective_fps"]
+                        )
                     underrun_ms = (
                         playback.audio_underruns - underruns_before
                     ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
                     video_underrun_ms = (
                         playback.video_underruns - video_underruns_before
                     ) / VIDEO_FPS * 1000
+                    video_dropped_ms = (
+                        playback.video_dropped - video_dropped_before
+                    ) / VIDEO_FPS * 1000
+                    speech_hold_ms = (
+                        playback.speech_holds - speech_holds_before
+                    ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
 
                     LOG.info(
                         "Phrase %d/%d timings: voice=%s cfg=%.2f tts=%.3fs tts_wait=%dms "
@@ -1466,6 +1688,10 @@ async def _create_clip(
                         buffered_seconds=round(playback.buffered_seconds, 3),
                         underrun_ms=round(underrun_ms),
                         video_underrun_ms=round(video_underrun_ms),
+                        video_dropped_ms=round(video_dropped_ms),
+                        speech_hold_ms=round(speech_hold_ms),
+                        speech_lead_ms=round(playback.speech_lead_seconds * 1000),
+                        render_fps_estimate=round(render_fps_estimate, 3),
                         first_ready_ms=first_ready_ms,
                     )
 
@@ -1504,6 +1730,10 @@ async def _create_clip(
             ),
             video_underrun_ms=round(
                 playback.video_underruns / VIDEO_FPS * 1000
+            ),
+            video_dropped_ms=round(playback.video_dropped / VIDEO_FPS * 1000),
+            speech_hold_ms=round(
+                playback.speech_holds * AUDIO_SAMPLES / AUDIO_RATE * 1000
             ),
         )
         await _send_event(channel, "ready", message="Ready")
@@ -1752,6 +1982,13 @@ async def health() -> JSONResponse:
         "driving_multiplier": AVATAR_DRIVING_MULTIPLIER,
         "normalize_lip": AVATAR_NORMALIZE_LIP,
         "eye_retargeting": AVATAR_EYE_RETARGETING,
+        "eye_motion_scale": AVATAR_EYE_MOTION_SCALE,
+        "lip_motion_scale": AVATAR_LIP_MOTION_SCALE,
+        "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
+        "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
+        "speech_start_gate": SPEECH_START_GATE,
+        "speech_start_safety": SPEECH_START_SAFETY,
+        "render_fps_estimate": round(render_fps_estimate, 3),
         "lip_retargeting": AVATAR_LIP_RETARGETING,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
         "voice_modes": sorted(SUPPORTED_VOICE_MODES),

@@ -550,6 +550,9 @@ def _write_csv(path: Path, runs: list[dict[str, Any]]) -> None:
         "media_seconds",
         "underrun_ms",
         "video_underrun_ms",
+        "video_dropped_ms",
+        "speech_hold_ms",
+        "speech_lead_ms",
         "first_ready_ms",
         "client_wall_ms",
     ]
