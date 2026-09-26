@@ -52,11 +52,14 @@ DIAR_MODE = os.getenv("LISTENER_DIAR_MODE", "very_low_latency")
 VAD_THRESHOLD = float(os.getenv("LISTENER_VAD_THRESHOLD", "0.5"))
 # Silence that closes an utterance. The conductor's turn-taking (M2) decides on
 # top of this when the user's turn is over.
-MIN_SILENCE_MS = int(os.getenv("LISTENER_MIN_SILENCE_MS", "500"))
+MIN_SILENCE_MS = int(os.getenv("LISTENER_MIN_SILENCE_MS", "300"))
 PREROLL_MS = int(os.getenv("LISTENER_PREROLL_MS", "300"))
 # Silence appended after an utterance so the ASR's look-ahead can finish the
 # last words and punctuation.
 FLUSH_MS = int(os.getenv("LISTENER_FLUSH_MS", "700"))
+# Opt-in: keep each utterance's audio next to the conversation log.
+SAVE_AUDIO = os.getenv("LISTENER_SAVE_AUDIO", "false").strip().lower() in {"1", "true", "yes", "on"}
+AUDIO_DIR = Path(os.getenv("LISTENER_AUDIO_DIR", "/workspace/results/conversations/audio"))
 VAD_WINDOW = 512  # Silero VAD's window at 16 kHz
 
 
@@ -144,6 +147,20 @@ def speaker_for_span(
     return f"spk{best}" if mean[best] >= min_activity else None
 
 
+def save_wav(samples: np.ndarray, index: int) -> str:
+    import wave
+
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    path = AUDIO_DIR / f"{time.strftime('%Y%m%dT%H%M%S')}-utt{index}.wav"
+    pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(SAMPLE_RATE)
+        handle.writeframes(pcm.tobytes())
+    return str(path)
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -211,6 +228,8 @@ class Utterance:
         self.language = language
         self.end = start
         self._audio: queue.Queue[np.ndarray | None] = queue.Queue()
+        self._recorded: list[np.ndarray] = []
+        self.audio_path: str | None = None
         self.text = ""
         self.done = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -218,9 +237,13 @@ class Utterance:
 
     def push(self, samples: np.ndarray) -> None:
         self._audio.put(samples)
+        if SAVE_AUDIO:
+            self._recorded.append(samples)
 
     def finish(self, end: float) -> None:
         self.end = end
+        if SAVE_AUDIO and self._recorded:
+            self.audio_path = save_wav(np.concatenate(self._recorded), self.index)
         self._audio.put(np.zeros(int(SAMPLE_RATE * FLUSH_MS / 1000), np.float32))
         self._audio.put(None)
 
@@ -391,6 +414,7 @@ class Session:
                 utterance.start,
                 utterance.end,
                 speaker,
+                {"audio": utterance.audio_path} if utterance.audio_path else {},
             )
         )
 

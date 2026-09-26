@@ -1,3 +1,24 @@
+# neural-avatar-v2t-conductor
+
+## v2T conductor and turn-taking (milestone M2 of `LISTENING_PLAN.md`)
+
+- New `conductor` image/process owns the conversation. The avatar reaches it
+  through `ConductorClient` (the `Conductor` interface, thin Unix-socket proxy)
+  and receives `say`/`show` commands (the `AvatarOutput` interface).
+- Turn-taking: half-duplex (speech that starts while the avatar talks is
+  ignored); the turn ends after 400 ms of silence when the text ends in
+  `?`/`.`/`!`, 700 ms otherwise, 1.2 s after a connective; the listener's own
+  utterance silence (now 300 ms) is subtracted. Push-to-talk in the page
+  bypasses thresholds and the speaker filter. Only the primary speaker (first
+  labelled voice) is answered.
+- The reply is still an echo ("You said: ..."); System 1 and 2 replace the
+  `Responder` in M3/M4. Measured: turn over 0.4 s after the final text, avatar
+  speaking 1.4 s later.
+- Every turn is one local JSON line in `results/conversations/`; utterance
+  audio is opt-in (`LISTENER_SAVE_AUDIO=true`); `forget.py` deletes logs.
+- Fix found by the tests: an utterance begun during push-to-talk whose final
+  text arrived after the release was dropped by the speaker filter.
+
 # neural-avatar-v2s-listening
 
 ## v2S listening (milestone M1 of `LISTENING_PLAN.md`)

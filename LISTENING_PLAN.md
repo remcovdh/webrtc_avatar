@@ -65,3 +65,14 @@ Each milestone is its own version with its own explanation and commit.
   about 1 s; final text arrives ~0.6 s after speech ends (0.5 s of which is
   the VAD's silence); diarization separates two voices and places the switch
   correctly; it costs ~24 ms of GPU per 0.64 s of audio.
+- **M2 done (v2T, 2026-09-26).** The user tested it: works well in English;
+  Dutch recognition is somewhat weaker but OK; echoing Dutch text with the
+  English voice sounds comical (English-only replies are the agreed v1). `conductor.py` runs as its own
+  process/image; the avatar reaches it through `ConductorClient` (the
+  `Conductor` interface) and receives `say`/`show` (the `AvatarOutput`
+  interface). Turn-taking as agreed; the listener's utterance silence was
+  lowered to 300 ms so the 400 ms threshold after `?`/`.` is reachable (the
+  conductor subtracts it). Measured end to end with test audio: turn over 0.4 s
+  after the final text (no punctuation: 700 - 300 ms), avatar starts replying
+  1.4 s later. Every turn is a JSON line in `results/conversations/`; audio is
+  opt-in (`LISTENER_SAVE_AUDIO=true`); `forget.py` deletes logs.

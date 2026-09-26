@@ -87,6 +87,17 @@ RUN python -m unittest -v test_listener.py
 CMD ["python", "/workspace/listener_worker.py"]
 
 
+# Conductor: owns the conversation (turn-taking, replies, logging). Its own
+# image so System 1 (Laya, M3) and System 2 (M4) can bring their own
+# dependencies without touching the avatar image.
+FROM common AS conductor
+
+WORKDIR /workspace
+COPY conversation_protocol.py listener_protocol.py conductor.py forget.py test_conductor.py /workspace/
+RUN python -m unittest -v test_conductor.py
+CMD ["python", "/workspace/conductor.py"]
+
+
 FROM common AS avatar
 
 ARG FASTER_LIVE_PORTRAIT_REF=master
@@ -173,7 +184,7 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py serve.py listener_client.py listener_protocol.py test_listener_client.py /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py serve.py listener_client.py listener_protocol.py test_listener_client.py conductor_client.py conversation_protocol.py test_conductor_client.py /workspace/FasterLivePortrait/
 # test_tts_provider.py validates the Compose-level provider switch as well as
 # the Python adapter, while test_visual_quality.py validates the host quality
 # runner. Include both fixtures so the same tests work in the source tree and
@@ -183,7 +194,7 @@ COPY quality_benchmark.sh /workspace/FasterLivePortrait/quality_benchmark.sh
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
-    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py test_listener_client.py
+    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py test_listener_client.py test_conductor_client.py
 
 EXPOSE 8000
 ENTRYPOINT ["/workspace/entrypoint.sh"]

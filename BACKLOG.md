@@ -86,6 +86,8 @@ Later:
   in the TTS image, supports `nl`) with the language chosen per sentence
   instead of per container; measure speed and preset-voice quality, possibly
   Turbo for English + Multilingual for Dutch (~2-3 GB extra VRAM).
+  (Observed in M2: Dutch text spoken by the English voice sounds like someone
+  with hardly any Dutch; Dutch ASR is also somewhat weaker than English.)
 - **Multi-party conversations**: the avatar knows several people are present
   and addresses them ("good point, and what do you think?"); needs real
   conversation state in System 2. Together with **voice enrolment**

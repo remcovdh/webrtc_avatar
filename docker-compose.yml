@@ -71,10 +71,34 @@ services:
       LISTENER_SOCKET: /run/avatar/listener.sock
       LISTENER_ASR_LOOKAHEAD: "${LISTENER_ASR_LOOKAHEAD:-3}"
       LISTENER_DIAR_MODE: "${LISTENER_DIAR_MODE:-very_low_latency}"
-      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-500}"
+      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
+      # Opt-in: keep each utterance's audio next to the conversation log.
+      LISTENER_SAVE_AUDIO: "${LISTENER_SAVE_AUDIO:-false}"
     volumes:
       - avatar-run:/run/avatar
       - ./models/hf-listener:/root/.cache/huggingface
+      - ./results:/workspace/results
+    restart: unless-stopped
+
+  # Conductor (M2): turn-taking, replies and the local conversation log
+  # (results/conversations/). Delete logs with forget.py (see its header).
+  conductor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: conductor
+    image: neural-avatar-conductor:latest
+    environment:
+      CONDUCTOR_SOCKET: /run/avatar/conductor.sock
+      # Silence that ends the user's turn: ends in ?/./! / otherwise / after a
+      # connective ("and", "maar", ...). LISTENER_MIN_SILENCE_MS is subtracted.
+      TURN_END_PUNCTUATION_MS: "${TURN_END_PUNCTUATION_MS:-400}"
+      TURN_SILENCE_MS: "${TURN_SILENCE_MS:-700}"
+      TURN_CONNECTIVE_MS: "${TURN_CONNECTIVE_MS:-1200}"
+      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
+    volumes:
+      - avatar-run:/run/avatar
+      - ./results:/workspace/results
     restart: unless-stopped
 
   webrtc-avatar:
@@ -210,6 +234,8 @@ services:
       AVATAR_TENSORRT_CACHE: /workspace/trt-cache
       # Listening: the listener worker's socket. Empty disables listening.
       LISTENER_SOCKET: "${AVATAR_LISTENER_SOCKET:-/run/avatar/listener.sock}"
+      # The conductor's socket. Empty disables conversation (typed text works).
+      CONDUCTOR_SOCKET: "${AVATAR_CONDUCTOR_SOCKET:-/run/avatar/conductor.sock}"
       # HTTPS for microphone access from other machines, with a self-signed
       # certificate for this host's IP addresses (see entrypoint.sh).
       HTTPS_PORT: "${AVATAR_HTTPS_PORT:-8443}"

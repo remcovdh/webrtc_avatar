@@ -43,6 +43,7 @@ results/claude-review/
 results/claude-review-images/
 results/motion-dumps/
 results/listener-test/
+results/conversations/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

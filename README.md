@@ -1,6 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2s-listening`
+Current build: `neural-avatar-v2t-conductor`
+
+## v2T conversation turns
+
+Build `neural-avatar-v2t-conductor` adds the conductor: talk to the avatar and it replies when your
+turn is over (for now by repeating what it heard). Hold "Hold to talk" for
+push-to-talk. Turns are logged locally in `results/conversations/`; delete them
+with `docker compose exec conductor python /workspace/forget.py --all --yes`.
 
 ## v2S listening
 

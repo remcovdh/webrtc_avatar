@@ -19,7 +19,7 @@ import uuid
 import wave
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,7 @@ import src.pipelines.faster_live_portrait_pipeline as flp_pipeline
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 from src.utils.utils import get_rotation_matrix
 
+from conductor_client import ConductorClient
 from listener_client import SocketListener
 from listener_protocol import SAMPLE_RATE as LISTENER_SAMPLE_RATE
 from listener_protocol import TranscriptEvent
@@ -55,7 +56,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2s-listening"
+SERVER_BUILD = "neural-avatar-v2t-conductor"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -152,6 +153,9 @@ TENSORRT_CACHE_DIR = os.getenv("AVATAR_TENSORRT_CACHE", "/workspace/trt-cache")
 # Unix socket of listener_worker.py (VAD + streaming ASR + diarization). Empty
 # disables listening; the avatar then works as before.
 LISTENER_SOCKET = os.getenv("LISTENER_SOCKET", "").strip()
+# Unix socket of conductor.py, which owns the conversation (turn-taking,
+# replies, logging). Empty disables it; typed text still works.
+CONDUCTOR_SOCKET = os.getenv("CONDUCTOR_SOCKET", "").strip()
 # When set, every rendered phrase saves its WAV and JoyVASA motion here so
 # motion problems can be analysed offline.
 DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
@@ -2106,6 +2110,7 @@ async def health() -> JSONResponse:
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
         "listener_enabled": bool(LISTENER_SOCKET),
+        "conductor_enabled": bool(CONDUCTOR_SOCKET),
         "crop_rotation": AVATAR_CROP_ROTATION,
         "warping_backend": warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
@@ -2204,6 +2209,40 @@ async def offer(request: Request) -> JSONResponse:
     jobs: set[asyncio.Task[Any]] = set()
     peer_channel: dict[str, Any] = {}
     listener = SocketListener(LISTENER_SOCKET) if LISTENER_SOCKET else None
+    conductor = ConductorClient(CONDUCTOR_SOCKET) if CONDUCTOR_SOCKET else None
+
+    def run_job(coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        jobs.add(task)
+        task.add_done_callback(jobs.discard)
+
+    async def speak(text: str, instruction: str, voice_mode: str) -> None:
+        """Every utterance of the avatar, so the conductor can ignore the
+        avatar's own voice while it talks (half-duplex)."""
+        if conductor is not None:
+            await conductor.on_avatar_speaking(True)
+        try:
+            await _create_clip(
+                text, instruction, voice_mode, playback, peer_channel.get("channel")
+            )
+        finally:
+            if conductor is not None:
+                await conductor.on_avatar_speaking(False)
+
+    class PeerOutput:
+        """`AvatarOutput` for this browser session."""
+
+        async def say(self, text: str) -> None:
+            if text and not playback.busy:
+                run_job(speak(text, TTS_INSTRUCTION, TTS_DEFAULT_VOICE_MODE))
+
+        async def show(self, state: dict[str, Any]) -> None:
+            channel = peer_channel.get("channel")
+            if channel is not None:
+                await _send_event(channel, "conversation", **state)
+
+    if conductor is not None:
+        await conductor.start(PeerOutput())
 
     async def forward_transcript(event: TranscriptEvent) -> None:
         channel = peer_channel.get("channel")
@@ -2222,6 +2261,8 @@ async def offer(request: Request) -> JSONResponse:
             # voice picked up by the microphone.
             avatar_speaking=playback.busy,
         )
+        if conductor is not None:
+            await conductor.on_transcript(asdict(event))
 
     async def listen(track: Any) -> None:
         """Browser microphone -> 16 kHz mono PCM -> listener."""
@@ -2255,6 +2296,8 @@ async def offer(request: Request) -> JSONResponse:
         if pc.connectionState in {"failed", "closed"}:
             for job in tuple(jobs):
                 job.cancel()
+            if conductor is not None:
+                await conductor.close()
             await pc.close()
             pcs.discard(pc)
 
@@ -2291,6 +2334,11 @@ async def offer(request: Request) -> JSONResponse:
             except json.JSONDecodeError:
                 payload = {"text": str(message)}
 
+            if payload.get("type") == "push_to_talk":
+                if conductor is not None:
+                    run_job(conductor.on_push_to_talk(bool(payload.get("pressed"))))
+                return
+
             if payload.get("type") == "listen_language":
                 if listener is not None:
                     task = asyncio.create_task(
@@ -2316,15 +2364,7 @@ async def offer(request: Request) -> JSONResponse:
                     )
                 )
             else:
-                task = asyncio.create_task(
-                    _create_clip(
-                        text,
-                        instruction,
-                        voice_mode,
-                        playback,
-                        channel,
-                    )
-                )
+                task = asyncio.create_task(speak(text, instruction, voice_mode))
             jobs.add(task)
             task.add_done_callback(jobs.discard)
 

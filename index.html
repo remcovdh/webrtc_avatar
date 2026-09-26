@@ -76,8 +76,10 @@
             <option value="nl-NL">Nederlands</option>
             <option value="auto">Automatic</option>
           </select>
+          <button id="pttBtn" class="secondary" disabled title="Hold while talking; the turn ends when you release">Hold to talk</button>
           <div class="meter" aria-hidden="true"><span id="micLevel"></span></div>
         </div>
+        <div class="details" id="conversationState">Conversation: not connected</div>
         <div id="transcript" aria-live="polite"><div class="details" id="listenHint">Listening is off</div></div>
       </section>
       <section class="metrics" aria-label="Progressive phrase timings">
@@ -115,6 +117,25 @@
     const transcript = document.querySelector("#transcript");
     const listenHint = document.querySelector("#listenHint");
     const listenLanguage = document.querySelector("#listenLanguage");
+    const pttBtn = document.querySelector("#pttBtn");
+    const conversationState = document.querySelector("#conversationState");
+    const conversation = { turn_state:"listening", primary_speaker:null, logging:false, session:null };
+    const turnLabels = { listening:"listening", user_speaking:"you are speaking", push_to_talk:"push-to-talk", avatar_speaking:"avatar speaking" };
+    function showConversation(message) {
+      Object.assign(conversation, message);
+      const parts = [`Turn: ${turnLabels[conversation.turn_state] || conversation.turn_state}`];
+      if (conversation.primary_speaker) parts.push(`answering ${conversation.primary_speaker}`);
+      parts.push(conversation.logging ? `logging on (session ${conversation.session})` : "logging off");
+      conversationState.textContent = parts.join(" · ");
+    }
+    function pushToTalk(pressed) {
+      if (channel?.readyState !== "open" || pttBtn.disabled) return;
+      channel.send(JSON.stringify({ type:"push_to_talk", pressed }));
+      pttBtn.textContent = pressed ? "Release to send" : "Hold to talk";
+    }
+    pttBtn.addEventListener("pointerdown", event => { pttBtn.setPointerCapture(event.pointerId); pushToTalk(true); });
+    pttBtn.addEventListener("pointerup", () => pushToTalk(false));
+    pttBtn.addEventListener("pointercancel", () => pushToTalk(false));
     try { listenLanguage.value = localStorage.getItem("listenLanguage") || "en-US"; } catch {}
     function sendListenLanguage() {
       try { localStorage.setItem("listenLanguage", listenLanguage.value); } catch {}
@@ -298,6 +319,8 @@
           } else if (message.type === "playing") {
             if (message.first_ready_ms != null) timingSummary.textContent = `First playback ready in ${formatMs(message.first_ready_ms)}`;
             setStatus(message.message || "Playing…", "good");
+          } else if (message.type === "conversation") {
+            showConversation(message);
           } else if (message.type === "transcript") {
             showTranscript(message);
           } else if (message.type === "summary") {
@@ -362,6 +385,7 @@
         micTrack = media.getAudioTracks()[0];
         await micTransceiver.sender.replaceTrack(micTrack);
         micBtn.textContent = "Mute microphone";
+        pttBtn.disabled = false;
         const context = new AudioContext();
         const analyser = context.createAnalyser();
         analyser.fftSize = 512;
