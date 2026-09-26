@@ -1,3 +1,19 @@
+# neural-avatar-v2r-upright-crop
+
+## v2R upright image without black borders; offset hang fix
+
+- The output frame was tilted with black corner wedges: FLP rotates the source
+  crop to straighten a slightly tilted face, and never passes its own
+  `flag_do_rot` to `crop_image`. `_crop_source_image` now keeps the crop upright
+  (`AVATAR_CROP_ROTATION=false`, default); the face keeps its natural tilt.
+- The 2.3x face crop reached 23 px past the left and 16 px past the top of the
+  512x512 portrait, which showed as black bands. The crop is now redone with
+  mirrored edges (`BORDER_REFLECT_101`), so background and hair continue.
+- Fix: with `AVATAR_LIP_SYNC_OFFSET_MS=80`, the last 80 ms of video frames never
+  became due once the voice ended, so the request waited forever (the browser's
+  "Generate & speak" button stayed disabled). During silence the video clock now
+  catches up by up to the offset.
+
 # neural-avatar-v2q-realtime-baseline
 
 ## v2Q real-time baseline

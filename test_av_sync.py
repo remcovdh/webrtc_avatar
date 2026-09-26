@@ -98,6 +98,27 @@ class AudioClockedVideoTests(unittest.TestCase):
             server.AVATAR_LIP_SYNC_OFFSET_MS = original
 
 
+    def test_offset_video_tail_plays_out_after_the_voice_ends(self) -> None:
+        original = server.AVATAR_LIP_SYNC_OFFSET_MS
+        try:
+            server.AVATAR_LIP_SYNC_OFFSET_MS = 80.0
+            playback = PlaybackBuffer()
+            playback.begin()
+            # 0.8 s fills whole 20 ms chunks, so no padding hides the tail.
+            playback.begin_phrase_stream(pcm(0.8), RENDER_FPS, 10)
+            playback.append_video_window(numbered_frames(0, 10))
+            playback.finish_phrase_stream()
+            playback.finish()
+            play_audio(playback, 1.2)  # 0.8 s of speech, then silence
+            for _ in range(VIDEO_FPS):
+                playback.next_video()
+            # Without catching up, the last 80 ms of frames never became due
+            # and the request waited on `busy` forever.
+            self.assertFalse(playback.busy)
+        finally:
+            server.AVATAR_LIP_SYNC_OFFSET_MS = original
+
+
 class SpeechStartGateTests(unittest.TestCase):
     def test_slow_render_holds_speech_until_enough_video_exists(self) -> None:
         playback = PlaybackBuffer()
@@ -229,6 +250,19 @@ class TensorRTWarpingTests(unittest.TestCase):
             self.assertEqual(server.warping_backend, "cuda")
         finally:
             server.AVATAR_TENSORRT, server.ort.get_available_providers = original
+
+
+class SourceCropTests(unittest.TestCase):
+    def test_crop_past_the_photo_edge_has_no_black_border(self) -> None:
+        image = np.full((100, 100, 3), 200, dtype=np.uint8)
+        # A face near the top-left corner: the 2.3x crop leaves the photo.
+        rng = np.random.default_rng(0)
+        pts = (rng.random((106, 2)) * 20 + 5).astype(np.float32)
+        crop = server._crop_source_image(image, pts, dsize=64, scale=2.3)
+        self.assertEqual(crop["img_crop"].shape, (64, 64, 3))
+        self.assertEqual(int(crop["img_crop"].min()), 200)
+        # Upright by default: the crop transform has no rotation component.
+        np.testing.assert_allclose(crop["M_o2c"][0, 1], 0.0, atol=1e-6)
 
 
 if __name__ == "__main__":

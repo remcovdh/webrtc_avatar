@@ -131,6 +131,9 @@ services:
       # mouth leads the loudness by ~40-160 ms; +80 felt right in the browser
       # and made the browser's audio/video buffers nearly equal (53/66 ms).
       AVATAR_LIP_SYNC_OFFSET_MS: "${AVATAR_LIP_SYNC_OFFSET_MS:-80}"
+      # FLP rotated the source crop to straighten the face, which tilted the
+      # whole frame and showed black wedges. false keeps the crop upright.
+      AVATAR_CROP_ROTATION: "${AVATAR_CROP_ROTATION:-false}"
       # How JoyVASA's mouth reaches the portrait. `absolute` uses its mouth
       # shapes directly (eyes and head stay relative); `relative` applied its
       # change since the first frame, which pressed this portrait's lips shut.

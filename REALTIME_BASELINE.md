@@ -1,4 +1,4 @@
-# Real-time avatar baseline (v2Q)
+# Real-time avatar baseline (v2Q, updated in v2R)
 
 This is the first build where the avatar starts speaking within about a second,
 talks without pauses between phrases, keeps its mouth in sync with the voice and
@@ -140,7 +140,19 @@ at close-ups of the mouth and eyes.
 - The page shows the browser's live buffers under the status box:
   `Browser buffers: audio … ms · video … ms`.
 
-## 6. Smoother motion (v2Q)
+## 6. Upright image without black borders (v2R)
+
+FLP rotates the source crop so the face is perfectly upright. This portrait's
+face is slightly tilted, so the whole frame was turned, with black wedges in the
+corners where the crop left the photo. FLP never passes its own `flag_do_rot`
+setting to `crop_image`, so `server.py` wraps it (`_crop_source_image`):
+
+- the crop stays upright (`AVATAR_CROP_ROTATION=false`); the face keeps its
+  natural tilt;
+- the parts of the crop outside the photo (23 px left, 16 px top for this
+  portrait) are filled with mirrored edges instead of black.
+
+## 7. Smoother motion (v2Q)
 
 With TensorRT there is enough speed for **stride 1**: all 25 JoyVASA motion
 frames per second are rendered, instead of every second one. When the buffer
@@ -158,6 +170,7 @@ runs low the server falls back to stride 2 (was 3), so smoothness changes less.
 | `AVATAR_EYE_MOTION_SCALE` | `0.3` | Damp eye motion |
 | `AVATAR_HEAD_MOTION_SCALE` | `0.3` | Damp head rotation/translation |
 | `AVATAR_LIP_SYNC_OFFSET_MS` | `80` | Show the mouth later (ms) |
+| `AVATAR_CROP_ROTATION` | `false` | Keep the source crop upright |
 | `AVATAR_DEBUG_DUMP_DIR` | empty | Save each phrase's WAV + motion |
 
 ## Tools used to get here
@@ -178,8 +191,6 @@ runs low the server falls back to stride 2 (was 3), so smoothness changes less.
   loudness 0.2-0.5), which limits how precise the lip-sync can look.
 - Stride 1 is close to the render budget (23-35 fps against 25 needed), so a
   phrase occasionally falls back to stride 2.
-- The output frame has a small fixed tilt with black corner wedges, from how FLP
-  crops and aligns the source photo.
 - Under QEMU passthrough the GPU can lock up ("GPU requires reset" in
   `nvidia-smi -q`): running processes continue but new CUDA processes fail.
   Recovery required restarting and killing the stuck GPU process.

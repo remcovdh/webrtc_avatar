@@ -42,6 +42,7 @@ from av import AudioFrame, VideoFrame
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from omegaconf import OmegaConf
+import src.pipelines.faster_live_portrait_pipeline as flp_pipeline
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 from src.utils.utils import get_rotation_matrix
 from src.pipelines.joyvasa_audio_to_motion_pipeline import (
@@ -49,7 +50,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2q-realtime-baseline"
+SERVER_BUILD = "neural-avatar-v2r-upright-crop"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -193,6 +194,12 @@ if not 0.0 <= AVATAR_LIP_MOTION_SCALE <= 2.0:
 AVATAR_HEAD_MOTION_SCALE = float(os.getenv("AVATAR_HEAD_MOTION_SCALE", "1.0"))
 if not 0.0 <= AVATAR_HEAD_MOTION_SCALE <= 1.5:
     raise ValueError("AVATAR_HEAD_MOTION_SCALE must be between 0.0 and 1.5")
+# FLP rotates the source crop so the face is upright. With a slightly tilted
+# face that turned the whole output frame, with black wedges where the crop
+# left the photo. FLP never passes its own flag_do_rot to crop_image, so the
+# server sets it (see _crop_source_image). false keeps the crop upright and
+# the face keeps its own tilt.
+AVATAR_CROP_ROTATION = _env_bool("AVATAR_CROP_ROTATION", False)
 # How JoyVASA's mouth keypoints reach the portrait. `relative` applies their
 # change since the utterance's first frame to the portrait's own closed-smile
 # lips, which pressed and sucked the lips in; `absolute` uses JoyVASA's mouth
@@ -376,6 +383,29 @@ def _load_avatar() -> np.ndarray:
 BASE_AVATAR = np.zeros((512, 512, 3), dtype=np.uint8)
 
 
+_FLP_CROP_IMAGE = flp_pipeline.crop_image
+
+
+def _crop_source_image(img: np.ndarray, pts: np.ndarray, **kwargs: Any) -> dict:
+    """FLP's source crop, upright by default and without black borders.
+
+    The face crop (2.3x the face size) reaches past the edges of a tightly
+    framed portrait; FLP filled that with black bands. Redo the same warp with
+    mirrored edges so the background and hair continue instead.
+    """
+    kwargs.setdefault("flag_do_rot", AVATAR_CROP_ROTATION)
+    crop = _FLP_CROP_IMAGE(img, pts, **kwargs)
+    dsize = kwargs.get("dsize", 224)
+    crop["img_crop"] = cv2.warpAffine(
+        img,
+        crop["M_o2c"][:2],
+        (dsize, dsize),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    return crop
+
+
 def _initialize_pipeline() -> GradioLivePortraitPipeline:
     """Load FasterLivePortrait and precompute the source portrait."""
     if not CONFIG_PATH.is_file():
@@ -416,6 +446,7 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
         AVATAR_LIP_RETARGETING,
     )
 
+    flp_pipeline.crop_image = _crop_source_image
     loaded = GradioLivePortraitPipeline(cfg=cfg, is_animal=False)
     _enable_tensorrt_warping(loaded)
     if not loaded.prepare_source(str(AVATAR_PATH), realtime=False):
@@ -550,6 +581,7 @@ class PlaybackBuffer:
         self.speech_lead_seconds = 0.0
         self._audio_queued_samples = 0
         self._audio_played_samples = 0
+        self._silence_samples = 0
         self._speech_gate_samples = 0
         self._speech_gate_open = True
         self._stream_fps = 0.0
@@ -726,7 +758,13 @@ class PlaybackBuffer:
         self.producing = False
 
     def next_video(self) -> np.ndarray:
-        playhead = self.playhead_seconds - AVATAR_LIP_SYNC_OFFSET_MS / 1000
+        # The lip-sync offset shows the mouth later than the voice. While the
+        # voice is silent (after a phrase, or during a speech hold) the audio
+        # clock stops, so let the video catch up by up to the offset; otherwise
+        # the last offset's worth of frames would never become due.
+        offset = AVATAR_LIP_SYNC_OFFSET_MS / 1000
+        silence = self._silence_samples / AUDIO_RATE
+        playhead = self.playhead_seconds - offset + min(silence, max(offset, 0.0))
         # Skip frames whose moment in the audio has already passed.
         while len(self.video) > 1 and self.video[1][0] <= playhead:
             self.video.popleft()
@@ -756,11 +794,15 @@ class PlaybackBuffer:
                 # Planned hold before a phrase; the video waits on the same
                 # clock, so both resume together once enough is rendered.
                 self.speech_holds += 1
+                self._silence_samples += AUDIO_SAMPLES
                 return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
             self._audio_played_samples += AUDIO_SAMPLES
+            self._silence_samples = 0
             return self.audio.popleft()
-        if self.started and self.producing:
-            self.audio_underruns += 1
+        if self.started:
+            self._silence_samples += AUDIO_SAMPLES
+            if self.producing:
+                self.audio_underruns += 1
         return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
 
     def clear(self) -> None:
@@ -776,6 +818,7 @@ class PlaybackBuffer:
         self.speech_lead_seconds = 0.0
         self._audio_queued_samples = 0
         self._audio_played_samples = 0
+        self._silence_samples = 0
         self._speech_gate_samples = 0
         self._speech_gate_open = True
         self._stream_fps = 0.0
@@ -2054,6 +2097,7 @@ async def health() -> JSONResponse:
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
+        "crop_rotation": AVATAR_CROP_ROTATION,
         "warping_backend": warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
         "speech_start_safety": SPEECH_START_SAFETY,

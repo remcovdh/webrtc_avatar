@@ -1,6 +1,12 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2q-realtime-baseline`
+Current build: `neural-avatar-v2r-upright-crop`
+
+## v2R upright image
+
+Build `neural-avatar-v2r-upright-crop` removes the tilted frame and black corners (upright crop with
+mirrored edges) and fixes a hang after speech with the +80 ms lip-sync offset.
+See `RELEASE.md` and `REALTIME_BASELINE.md`.
 
 ## v2Q real-time baseline
 
