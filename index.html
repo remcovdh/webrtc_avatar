@@ -39,6 +39,14 @@
     th { color:var(--muted); font-weight:600; }
     tbody tr:last-child td { border-bottom:0; }
     .empty { color:var(--muted); text-align:center!important; }
+    .listen { display:grid; gap:8px; }
+    .listen-head { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#cdd3da; font-size:13px; }
+    .meter { flex:1; height:6px; border-radius:999px; background:#20262e; overflow:hidden; }
+    .meter span { display:block; height:100%; width:0; background:var(--good); transition:width .08s; }
+    #transcript { max-height:180px; overflow:auto; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:#0d1015; font-size:13px; display:grid; gap:5px; }
+    #transcript .line.partial { color:var(--muted); font-style:italic; }
+    #transcript .line.echo { opacity:.5; }
+    #transcript .spk { display:inline-block; min-width:38px; margin-right:6px; color:var(--accent); font-size:11px; font-weight:700; }
     @media (max-width:760px) { main { grid-template-columns:1fr; max-width:512px; } }
   </style>
 </head>
@@ -60,6 +68,18 @@
         <button id="audioBtn" class="secondary">Enable audio</button>
       </div>
       <div id="status" role="status" aria-live="polite">Checking the server…</div>
+      <section class="listen" aria-label="Listening">
+        <div class="listen-head">
+          <button id="micBtn" class="secondary" disabled>Enable microphone</button>
+          <select id="listenLanguage" aria-label="Spoken language" style="width:auto">
+            <option value="en-US">English</option>
+            <option value="nl-NL">Nederlands</option>
+            <option value="auto">Automatic</option>
+          </select>
+          <div class="meter" aria-hidden="true"><span id="micLevel"></span></div>
+        </div>
+        <div id="transcript" aria-live="polite"><div class="details" id="listenHint">Listening is off</div></div>
+      </section>
       <section class="metrics" aria-label="Progressive phrase timings">
         <div class="metrics-head">
           <span>Phrase timings</span>
@@ -90,6 +110,21 @@
     const timingSummary = document.querySelector("#timingSummary");
     const runtimeDetails = document.querySelector("#runtimeDetails");
     const syncDetails = document.querySelector("#syncDetails");
+    const micBtn = document.querySelector("#micBtn");
+    const micLevel = document.querySelector("#micLevel");
+    const transcript = document.querySelector("#transcript");
+    const listenHint = document.querySelector("#listenHint");
+    const listenLanguage = document.querySelector("#listenLanguage");
+    try { listenLanguage.value = localStorage.getItem("listenLanguage") || "en-US"; } catch {}
+    function sendListenLanguage() {
+      try { localStorage.setItem("listenLanguage", listenLanguage.value); } catch {}
+      if (channel?.readyState === "open") {
+        channel.send(JSON.stringify({ type:"listen_language", language:listenLanguage.value }));
+      }
+    }
+    listenLanguage.addEventListener("change", sendListenLanguage);
+    let micTransceiver, micTrack;
+    const transcriptLines = new Map();
     let serverLipOffsetMs = 0;
     let voiceModes = [];
     let pc, channel;
@@ -227,12 +262,15 @@
           : "phrase-batch frames";
         runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · TTS ${healthBody.tts_provider || "unknown"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
         serverLipOffsetMs = Number(healthBody.lip_sync_offset_ms || 0);
+        configureListening(Boolean(healthBody.listener_enabled));
         const config = await fetch("/client-config").then(response => response.json());
         configureVoiceModes(config);
         pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
         channel = pc.createDataChannel("avatar-control");
         pc.addTransceiver("video", { direction: "recvonly" });
-        pc.addTransceiver("audio", { direction: "recvonly" });
+        // sendrecv from the start, so the microphone can be switched on later
+        // with replaceTrack() and no renegotiation.
+        micTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
         pc.ontrack = event => {
           if (!stream.getTracks().some(track => track.id === event.track.id)) stream.addTrack(event.track);
           video.play().catch(() => {});
@@ -243,7 +281,7 @@
             setReady(false); setStatus(`WebRTC ${pc.connectionState}`, "bad");
           }
         };
-        channel.onopen = () => { badge.textContent = "connected"; setReady(true); };
+        channel.onopen = () => { badge.textContent = "connected"; setReady(true); sendListenLanguage(); };
         channel.onmessage = event => {
           let message;
           try { message = JSON.parse(event.data); }
@@ -260,6 +298,8 @@
           } else if (message.type === "playing") {
             if (message.first_ready_ms != null) timingSummary.textContent = `First playback ready in ${formatMs(message.first_ready_ms)}`;
             setStatus(message.message || "Playing…", "good");
+          } else if (message.type === "transcript") {
+            showTranscript(message);
           } else if (message.type === "summary") {
             timingSummary.textContent = `TTS ${formatMs(message.tts_ms)} · render ${formatMs(message.render_ms)} · total ${formatMs(message.total_ms)} · audio gaps ${formatMs(message.underrun_ms)} · video holds ${formatMs(message.video_underrun_ms)}`;
             setStatus(message.message || "Playback complete", "good");
@@ -279,6 +319,66 @@
         badge.textContent = "offline"; setStatus(error.message, "bad");
       }
     }
+
+    function configureListening(enabled) {
+      if (!enabled) { listenHint.textContent = "Listening is not configured on the server"; return; }
+      if (!window.isSecureContext) {
+        const url = `https://${location.hostname}:8443/`;
+        listenHint.innerHTML = `The microphone needs HTTPS: open <a href="${url}">${url}</a> (accept the self-signed certificate once).`;
+        return;
+      }
+      listenHint.textContent = "Press “Enable microphone” and start talking (Dutch or English)";
+      micBtn.disabled = false;
+    }
+    function showTranscript(message) {
+      if (message.kind === "status") return;
+      listenHint.remove();
+      let line = transcriptLines.get(message.utterance);
+      if (!line) {
+        line = document.createElement("div");
+        transcriptLines.set(message.utterance, line);
+        transcript.appendChild(line);
+      }
+      const final = message.kind === "final";
+      line.className = `line ${final ? "final" : "partial"}${message.avatar_speaking ? " echo" : ""}`;
+      line.innerHTML = "";
+      const speaker = document.createElement("span");
+      speaker.className = "spk";
+      speaker.textContent = final ? (message.speaker || "?") : "…";
+      line.append(speaker, document.createTextNode(message.text || "(listening)"));
+      line.title = `${message.start.toFixed(2)}-${message.end.toFixed(2)} s${message.avatar_speaking ? " · heard while the avatar was speaking" : ""}`;
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+    async function toggleMicrophone() {
+      if (micTrack) {
+        micTrack.enabled = !micTrack.enabled;
+        micBtn.textContent = micTrack.enabled ? "Mute microphone" : "Unmute microphone";
+        return;
+      }
+      try {
+        const media = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:1 },
+        });
+        micTrack = media.getAudioTracks()[0];
+        await micTransceiver.sender.replaceTrack(micTrack);
+        micBtn.textContent = "Mute microphone";
+        const context = new AudioContext();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 512;
+        context.createMediaStreamSource(media).connect(analyser);
+        const samples = new Float32Array(analyser.fftSize);
+        const draw = () => {
+          analyser.getFloatTimeDomainData(samples);
+          const rms = Math.sqrt(samples.reduce((sum, v) => sum + v * v, 0) / samples.length);
+          micLevel.style.width = `${micTrack.enabled ? Math.min(100, rms * 400) : 0}%`;
+          requestAnimationFrame(draw);
+        };
+        draw();
+      } catch (error) {
+        setStatus(`Microphone unavailable: ${error.message}`, "bad");
+      }
+    }
+    micBtn.addEventListener("click", toggleMicrophone);
 
     function sendText() {
       const text = textInput.value.trim();

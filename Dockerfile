@@ -71,6 +71,22 @@ ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["chatterbox"]
 
 
+# Listening worker: VAD + streaming ASR + diarization. Isolated from the avatar
+# stage (NumPy 1.26, FLP) because the Nemotron speech models need a
+# Transformers build newer than any release (streaming RNNT and Sortformer
+# support landed on main in 2026); pinned to a commit for reproducibility.
+FROM common AS listener
+
+ARG TRANSFORMERS_COMMIT=27166ea03f12c940f23176a904ab1d2ff1a3dcbb
+WORKDIR /workspace
+RUN python -m pip install \
+      "transformers @ git+https://github.com/huggingface/transformers@${TRANSFORMERS_COMMIT}" \
+      "silero-vad>=6,<7" librosa soundfile
+COPY listener_protocol.py listener_worker.py test_listener.py /workspace/
+RUN python -m unittest -v test_listener.py
+CMD ["python", "/workspace/listener_worker.py"]
+
+
 FROM common AS avatar
 
 ARG FASTER_LIVE_PORTRAIT_REF=master
@@ -157,7 +173,7 @@ COPY patch_warping_onnx.py /workspace/patch_warping_onnx.py
 RUN python -m py_compile /workspace/patch_warping_onnx.py \
     && python /workspace/patch_warping_onnx.py --self-test
 
-COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py /workspace/FasterLivePortrait/
+COPY server.py index.html benchmark_avatar.py chatterbox_api.py test_benchmark_handshake.py test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py serve.py listener_client.py listener_protocol.py test_listener_client.py /workspace/FasterLivePortrait/
 # test_tts_provider.py validates the Compose-level provider switch as well as
 # the Python adapter, while test_visual_quality.py validates the host quality
 # runner. Include both fixtures so the same tests work in the source tree and
@@ -167,7 +183,7 @@ COPY quality_benchmark.sh /workspace/FasterLivePortrait/quality_benchmark.sh
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 RUN cd /workspace/FasterLivePortrait \
-    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py
+    && python -m unittest -v test_motion_continuity.py test_neural_idle_frame.py test_frame_windows.py test_tts_provider.py test_progressive_scheduling.py test_visual_quality.py test_av_sync.py test_listener_client.py
 
 EXPOSE 8000
 ENTRYPOINT ["/workspace/entrypoint.sh"]

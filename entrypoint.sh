@@ -37,6 +37,33 @@ download_models() {
 
 }
 
+# Self-signed certificate for HTTPS (microphone access from other machines).
+# It covers the host's IP addresses plus localhost and is regenerated when that
+# list changes, e.g. after the VM gets a new address.
+ensure_https_certificate() {
+  local cert_dir="${HTTPS_CERT_DIR:-/workspace/certs}"
+  local hosts="${HTTPS_CERT_HOSTS:-$(hostname -I 2>/dev/null) 127.0.0.1 localhost}"
+  local san="" host
+  for host in ${hosts}; do
+    if [[ "${host}" =~ ^[0-9.]+$ || "${host}" == *:* ]]; then
+      san+="IP:${host},"
+    else
+      san+="DNS:${host},"
+    fi
+  done
+  san="${san%,}"
+  mkdir -p "${cert_dir}"
+  export HTTPS_CERT_FILE="${cert_dir}/avatar-cert.pem"
+  export HTTPS_KEY_FILE="${cert_dir}/avatar-key.pem"
+  if [[ ! -f "${HTTPS_CERT_FILE}" || "$(cat "${cert_dir}/san.txt" 2>/dev/null)" != "${san}" ]]; then
+    echo "[https] Creating a self-signed certificate for ${san}"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+      -keyout "${HTTPS_KEY_FILE}" -out "${HTTPS_CERT_FILE}" \
+      -subj "/CN=neural-avatar" -addext "subjectAltName=${san}" 2>/dev/null
+    echo "${san}" > "${cert_dir}/san.txt"
+  fi
+}
+
 download_breeze_model() {
   mkdir -p "${breeze_model}"
   if [[ ! -f "${breeze_model}/.download-complete" ]]; then
@@ -52,7 +79,10 @@ case "${mode}" in
     ;;
   serve)
     cd "${flp_root}"
-    exec uvicorn server:app --host 0.0.0.0 --port "${PORT:-8000}"
+    if [[ -n "${HTTPS_PORT:-}" ]]; then
+      ensure_https_certificate
+    fi
+    exec python serve.py
     ;;
   tts)
     download_breeze_model

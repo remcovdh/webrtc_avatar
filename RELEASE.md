@@ -1,3 +1,22 @@
+# neural-avatar-v2s-listening
+
+## v2S listening (milestone M1 of `LISTENING_PLAN.md`)
+
+- New `listener` image and process: Silero VAD (CPU), Nemotron 3.5 streaming
+  ASR 0.6B and Nemotron-3-Diarization, through Transformers (pinned main
+  commit) rather than NeMo, whose integration needs Python 3.13 / CUDA 13.
+  1.67 GB of GPU memory; ~24 ms of GPU per 0.64 s of audio for diarization.
+- The avatar codes against the `Listener` interface (`listener_protocol.py`);
+  `SocketListener` proxies it over a Unix socket (tiny binary framing, no HTTP).
+  Without a running listener the avatar works as before.
+- The page streams the microphone over the existing WebRTC connection and shows
+  a live transcript with speaker labels. Spoken language is chosen in the page:
+  English (default), Nederlands or Automatic (which mixed languages on Dutch).
+- HTTPS on port 8443 with a self-signed certificate for the host's IP addresses,
+  so the microphone works from other machines (`serve.py`, `entrypoint.sh`).
+- Workaround: the pinned processor gives one mel frame too many for the first
+  streaming chunk; `fit_frames` trims chunks to the size the model requires.
+
 # neural-avatar-v2r-upright-crop
 
 ## v2R upright image without black borders; offset hang fix

@@ -38,19 +38,24 @@ from aiortc import (
     AudioStreamTrack,
     VideoStreamTrack,
 )
-from av import AudioFrame, VideoFrame
+from av import AudioFrame, AudioResampler, VideoFrame
+from aiortc.mediastreams import MediaStreamError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from omegaconf import OmegaConf
 import src.pipelines.faster_live_portrait_pipeline as flp_pipeline
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 from src.utils.utils import get_rotation_matrix
+
+from listener_client import SocketListener
+from listener_protocol import SAMPLE_RATE as LISTENER_SAMPLE_RATE
+from listener_protocol import TranscriptEvent
 from src.pipelines.joyvasa_audio_to_motion_pipeline import (
     JoyVASAAudio2MotionPipeline,
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2r-upright-crop"
+SERVER_BUILD = "neural-avatar-v2s-listening"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -144,6 +149,9 @@ SPEECH_START_SAFETY = max(1.0, float(os.getenv("SPEECH_START_SAFETY", "1.15")))
 # 5080. Engines are cached, so only the first start spends ~30 s building.
 AVATAR_TENSORRT = _env_bool("AVATAR_TENSORRT", False)
 TENSORRT_CACHE_DIR = os.getenv("AVATAR_TENSORRT_CACHE", "/workspace/trt-cache")
+# Unix socket of listener_worker.py (VAD + streaming ASR + diarization). Empty
+# disables listening; the avatar then works as before.
+LISTENER_SOCKET = os.getenv("LISTENER_SOCKET", "").strip()
 # When set, every rendered phrase saves its WAV and JoyVASA motion here so
 # motion problems can be analysed offline.
 DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
@@ -2097,6 +2105,7 @@ async def health() -> JSONResponse:
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
+        "listener_enabled": bool(LISTENER_SOCKET),
         "crop_rotation": AVATAR_CROP_ROTATION,
         "warping_backend": warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
@@ -2193,6 +2202,52 @@ async def offer(request: Request) -> JSONResponse:
     pcs.add(pc)
     playback = PlaybackBuffer()
     jobs: set[asyncio.Task[Any]] = set()
+    peer_channel: dict[str, Any] = {}
+    listener = SocketListener(LISTENER_SOCKET) if LISTENER_SOCKET else None
+
+    async def forward_transcript(event: TranscriptEvent) -> None:
+        channel = peer_channel.get("channel")
+        if channel is None:
+            return
+        await _send_event(
+            channel,
+            "transcript",
+            kind=event.type,
+            utterance=event.utterance,
+            text=event.text,
+            start=round(event.start, 2),
+            end=round(event.end, 2),
+            speaker=event.speaker,
+            # Lets the page (and the M2 conductor) ignore the avatar's own
+            # voice picked up by the microphone.
+            avatar_speaking=playback.busy,
+        )
+
+    async def listen(track: Any) -> None:
+        """Browser microphone -> 16 kHz mono PCM -> listener."""
+        assert listener is not None
+        await listener.start(forward_transcript)
+        resampler = AudioResampler(
+            format="s16", layout="mono", rate=LISTENER_SAMPLE_RATE
+        )
+        try:
+            while True:
+                frame = await track.recv()
+                for resampled in resampler.resample(frame):
+                    await listener.feed(resampled.to_ndarray().tobytes())
+        except MediaStreamError:
+            pass
+        finally:
+            await listener.close()
+
+    @pc.on("track")
+    def on_track(track: Any) -> None:
+        if track.kind != "audio" or listener is None:
+            return
+        LOG.info("Microphone track received; streaming it to the listener")
+        task = asyncio.create_task(listen(track))
+        jobs.add(task)
+        task.add_done_callback(jobs.discard)
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange() -> None:
@@ -2206,6 +2261,7 @@ async def offer(request: Request) -> JSONResponse:
     @pc.on("datachannel")
     def on_datachannel(channel: Any) -> None:
         LOG.info("Data channel connected: %s", channel.label)
+        peer_channel["channel"] = channel
 
         ready_announced = False
 
@@ -2234,6 +2290,15 @@ async def offer(request: Request) -> JSONResponse:
                 payload = json.loads(message) if isinstance(message, str) else {}
             except json.JSONDecodeError:
                 payload = {"text": str(message)}
+
+            if payload.get("type") == "listen_language":
+                if listener is not None:
+                    task = asyncio.create_task(
+                        listener.set_language(str(payload.get("language", "")))
+                    )
+                    jobs.add(task)
+                    task.add_done_callback(jobs.discard)
+                return
 
             text = str(payload.get("text", "")).strip()
             instruction = str(payload.get("instruction", TTS_INSTRUCTION)).strip()

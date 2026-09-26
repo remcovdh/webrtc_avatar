@@ -1,6 +1,14 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2r-upright-crop`
+Current build: `neural-avatar-v2s-listening`
+
+## v2S listening
+
+Build `neural-avatar-v2s-listening` lets the avatar listen: open **https://<vm-ip>:8443/** (accept the
+self-signed certificate once), press "Enable microphone" and speak English or
+Dutch (choose the language next to the button). The transcript appears live
+with speaker labels; replies follow in the next milestones. See
+[`LISTENING_PLAN.md`](LISTENING_PLAN.md) and [`BACKLOG.md`](BACKLOG.md).
 
 ## v2R upright image
 

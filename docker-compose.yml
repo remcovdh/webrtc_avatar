@@ -57,6 +57,26 @@ services:
       start_period: 120s
     restart: "no"
 
+  # Listening worker (M1): VAD + Nemotron 3.5 streaming ASR + Nemotron-3-
+  # Diarization. Its own image because it needs a newer Transformers build than
+  # the avatar image; the avatar reaches it through a Unix socket.
+  listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: listener
+    image: neural-avatar-listener:latest
+    gpus: all
+    environment:
+      LISTENER_SOCKET: /run/avatar/listener.sock
+      LISTENER_ASR_LOOKAHEAD: "${LISTENER_ASR_LOOKAHEAD:-3}"
+      LISTENER_DIAR_MODE: "${LISTENER_DIAR_MODE:-very_low_latency}"
+      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-500}"
+    volumes:
+      - avatar-run:/run/avatar
+      - ./models/hf-listener:/root/.cache/huggingface
+    restart: unless-stopped
+
   webrtc-avatar:
     build: *avatar-build
     image: neural-avatar:latest
@@ -188,6 +208,12 @@ services:
       # engines into the cache below (~30 s); later starts reuse them.
       AVATAR_TENSORRT: "${AVATAR_TENSORRT:-true}"
       AVATAR_TENSORRT_CACHE: /workspace/trt-cache
+      # Listening: the listener worker's socket. Empty disables listening.
+      LISTENER_SOCKET: "${AVATAR_LISTENER_SOCKET:-/run/avatar/listener.sock}"
+      # HTTPS for microphone access from other machines, with a self-signed
+      # certificate for this host's IP addresses (see entrypoint.sh).
+      HTTPS_PORT: "${AVATAR_HTTPS_PORT:-8443}"
+      HTTPS_CERT_DIR: /workspace/certs
       # For remote/NAT clients, set a TURN server JSON array here.
       ICE_SERVERS_JSON: "[]"
     volumes:
@@ -195,6 +221,8 @@ services:
       - ./checkpoints:/workspace/FasterLivePortrait/checkpoints:ro
       - ./results:/workspace/results
       - ./models/trt-cache:/workspace/trt-cache
+      - ./models/certs:/workspace/certs
+      - avatar-run:/run/avatar
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -226,3 +254,7 @@ services:
       tts:
         condition: service_healthy
     restart: "no"
+
+volumes:
+  # Unix sockets shared between the avatar and its worker processes.
+  avatar-run:

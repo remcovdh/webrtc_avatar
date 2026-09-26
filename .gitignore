@@ -42,6 +42,7 @@ results/quality-benchmarks/
 results/claude-review/
 results/claude-review-images/
 results/motion-dumps/
+results/listener-test/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
