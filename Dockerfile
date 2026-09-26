@@ -128,6 +128,21 @@ RUN python -m pip install \
       "httpx>=0.27,<1" \
       "uvicorn[standard]>=0.30,<1"
 
+# TensorRT runtime libraries for ONNX Runtime's TensorRT execution provider.
+# FP16 TensorRT renders warping_spade in ~27 ms instead of ~97 ms with the
+# CUDA provider on the RTX 5080. Its 5-D GridSample is unsupported by TensorRT
+# and stays on the CUDA provider; ORT partitions the graph automatically.
+# This does not use FasterLivePortrait's TensorRT 8 / PyCUDA route.
+# The package ships engine-builder resources for every GPU generation plus
+# Windows cross-compilation copies (6.2 GB); keep only what an sm_120
+# (RTX 50-series) engine build needs (~1.1 GB).
+RUN python -m pip install "tensorrt-cu12-libs==10.16.1.11" \
+    && cd /opt/conda/lib/python3.11/site-packages/tensorrt_libs \
+    && find . -name 'libnvinfer_builder_resource_*' \
+         ! -name 'libnvinfer_builder_resource_sm120.so.*' -delete \
+    && test -f libnvinfer.so.10 && ls libnvinfer_builder_resource_sm120.so.*
+ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/tensorrt_libs:${LD_LIBRARY_PATH}
+
 # Torchaudio 2.9 delegates audio decoding to TorchCodec. Catch missing FFmpeg
 # libraries or a Torch/TorchCodec ABI mismatch while building, not on the first
 # browser request.

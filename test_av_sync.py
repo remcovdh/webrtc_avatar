@@ -190,5 +190,30 @@ class ExpressionMotionScaleTests(unittest.TestCase):
         np.testing.assert_allclose(animated[:, others, :], 1.2, rtol=1e-6)
 
 
+class TensorRTWarpingTests(unittest.TestCase):
+    def test_disabled_or_unavailable_tensorrt_keeps_the_cuda_session(self) -> None:
+        class Predictor:
+            onnx_model = "cuda-session"
+
+        class Model:
+            predictor = Predictor()
+            kwargs = {"model_path": "/nonexistent/warping_spade.onnx"}
+
+        loaded = type("Loaded", (), {"model_dict": {"warping_spade": Model()}})()
+        original = server.AVATAR_TENSORRT, server.ort.get_available_providers
+        try:
+            server.AVATAR_TENSORRT = False
+            server._enable_tensorrt_warping(loaded)
+            self.assertEqual(Model.predictor.onnx_model, "cuda-session")
+
+            server.AVATAR_TENSORRT = True
+            server.ort.get_available_providers = lambda: ["CUDAExecutionProvider"]
+            server._enable_tensorrt_warping(loaded)
+            self.assertEqual(Model.predictor.onnx_model, "cuda-session")
+            self.assertEqual(server.warping_backend, "cuda")
+        finally:
+            server.AVATAR_TENSORRT, server.ort.get_available_providers = original
+
+
 if __name__ == "__main__":
     unittest.main()

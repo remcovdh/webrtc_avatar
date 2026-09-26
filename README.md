@@ -1,6 +1,18 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2o-audio-clock-expression`
+Current build: `neural-avatar-v2p-tensorrt-fp16`
+
+## v2P TensorRT FP16 face rendering
+
+Build `neural-avatar-v2p-tensorrt-fp16` renders the face with TensorRT FP16 (27 ms instead of 97 ms per
+frame on the RTX 5080), so speech starts about 0.9 s after sending and phrases
+follow each other without pauses. See `RELEASE.md`.
+
+```bash
+AVATAR_TENSORRT=true        # false = ONNX Runtime CUDA provider (~9 FPS)
+AVATAR_RENDER_STRIDE=1      # optional: render all 25 motion FPS (smoother,
+                            # just within TensorRT's 23-35 FPS budget)
+```
 
 ## v2O audio-clocked playback and expression control
 

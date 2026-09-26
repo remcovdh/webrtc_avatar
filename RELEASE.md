@@ -1,3 +1,24 @@
+# neural-avatar-v2p-tensorrt-fp16
+
+## v2P TensorRT FP16 face rendering
+
+- `warping_spade`, the per-frame bottleneck, now runs through ONNX Runtime's
+  TensorRT execution provider in FP16: 27 ms instead of 97 ms per frame on the
+  RTX 5080 (FP32 TensorRT only reached 87 ms). Mean output difference versus
+  the CUDA provider is 0.00125 on a 0-1 scale; no visible change.
+- TensorRT cannot import the 5-D GridSample, so ONNX Runtime keeps that node on
+  the CUDA provider and runs the rest in TensorRT.
+- End-to-end rendering rose from ~9 to 22-35 frames/s. The user's three-phrase
+  test text now plays in 10.2 s instead of 15.4 s, with no speech wait and no
+  gaps between phrases.
+- `AVATAR_TENSORRT=true` (default); engines are cached in `./models/trt-cache`
+  (first start builds them in ~30 s). Any TensorRT failure falls back to the
+  CUDA provider; `/health` reports `warping_backend`.
+- The speech-start estimate is raised by the warm-up's measured render speed,
+  removing the first phrase's wait for the assumed `EXPECTED_RENDER_FPS`.
+- The image installs `tensorrt-cu12-libs==10.16.1.11` but keeps only the
+  sm_120 builder resources: 1.1 GB instead of 6.2 GB of libraries.
+
 # neural-avatar-v2o-audio-clock-expression
 
 ## v2O audio-clocked playback, speech start gate and expression control

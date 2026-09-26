@@ -48,7 +48,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2o-audio-clock-expression"
+SERVER_BUILD = "neural-avatar-v2p-tensorrt-fp16"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -137,6 +137,11 @@ SPEECH_START_GATE = _env_bool("SPEECH_START_GATE", True)
 # Initial rendered-frames-per-second estimate; replaced by measurements.
 EXPECTED_RENDER_FPS = max(0.1, float(os.getenv("EXPECTED_RENDER_FPS", "9.0")))
 SPEECH_START_SAFETY = max(1.0, float(os.getenv("SPEECH_START_SAFETY", "1.15")))
+# Render FLP's warping_spade (the per-frame bottleneck) through ONNX Runtime's
+# TensorRT provider in FP16: ~27 ms instead of ~97 ms per frame on the RTX
+# 5080. Engines are cached, so only the first start spends ~30 s building.
+AVATAR_TENSORRT = _env_bool("AVATAR_TENSORRT", False)
+TENSORRT_CACHE_DIR = os.getenv("AVATAR_TENSORRT_CACHE", "/workspace/trt-cache")
 # When set, every rendered phrase saves its WAV and JoyVASA motion here so
 # motion problems can be analysed offline.
 DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
@@ -225,6 +230,7 @@ warmup_error: str | None = None
 tts_startup_wait_seconds: float | None = None
 idle_frame_source = "original-avatar"
 idle_frame_index: int | None = None
+warping_backend = "cuda"
 render_fps_estimate = EXPECTED_RENDER_FPS
 
 VOICE_MODE_DESIGN = "design"
@@ -405,11 +411,59 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     )
 
     loaded = GradioLivePortraitPipeline(cfg=cfg, is_animal=False)
+    _enable_tensorrt_warping(loaded)
     if not loaded.prepare_source(str(AVATAR_PATH), realtime=False):
         raise ValueError(
             "No face was detected in avatar.jpg. Use a clear, front-facing portrait."
         )
     return loaded
+
+
+def _enable_tensorrt_warping(loaded: Any) -> None:
+    """Swap warping_spade's ORT session for a TensorRT FP16 one if possible.
+
+    The model's inputs and outputs are unchanged, so FLP's predictor keeps
+    working; any failure leaves the CUDA session in place.
+    """
+    global warping_backend
+    warping_backend = "cuda"
+    if not AVATAR_TENSORRT:
+        return
+    if "TensorrtExecutionProvider" not in ort.get_available_providers():
+        LOG.warning("AVATAR_TENSORRT is set but ONNX Runtime has no TensorRT provider")
+        return
+    model = loaded.model_dict["warping_spade"]
+    model_path = model.kwargs["model_path"]
+    Path(TENSORRT_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    options = {
+        "trt_fp16_enable": True,
+        "trt_engine_cache_enable": True,
+        "trt_engine_cache_path": TENSORRT_CACHE_DIR,
+    }
+    started = time.perf_counter()
+    try:
+        session = ort.InferenceSession(
+            model_path,
+            providers=[("TensorrtExecutionProvider", options), "CUDAExecutionProvider"],
+        )
+        # Build (or load) the engines now rather than on the first request.
+        session.run(
+            None,
+            {
+                item.name: np.zeros(item.shape, dtype=np.float32)
+                for item in session.get_inputs()
+            },
+        )
+    except Exception:
+        LOG.exception("TensorRT warping session failed; keeping the CUDA provider")
+        return
+    model.predictor.onnx_model = session
+    warping_backend = "tensorrt-fp16"
+    LOG.info(
+        "warping_spade uses TensorRT FP16 (ready in %.1fs, cache %s)",
+        time.perf_counter() - started,
+        TENSORRT_CACHE_DIR,
+    )
 
 
 def _split_phrases(text: str) -> list[str]:
@@ -1793,6 +1847,7 @@ async def _warmup_pipeline() -> None:
     global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
     global tts_startup_wait_seconds
     global BASE_AVATAR, idle_frame_source, idle_frame_index
+    global render_fps_estimate
 
     started = time.perf_counter()
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1863,6 +1918,12 @@ async def _warmup_pipeline() -> None:
                     3,
                 ),
             }
+            # A cold CUDA warm-up under-reports speed, so it may only raise the
+            # estimate: with TensorRT it removes the first phrase's needless
+            # wait for the assumed EXPECTED_RENDER_FPS.
+            render_fps_estimate = max(
+                render_fps_estimate, render_detail.get("effective_fps", 0.0)
+            )
             warmup_complete = True
             LOG.info(
                 "Startup warm-up complete: total=%.3fs tts=%dms pipeline=%dms "
@@ -1986,6 +2047,7 @@ async def health() -> JSONResponse:
         "lip_motion_scale": AVATAR_LIP_MOTION_SCALE,
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
+        "warping_backend": warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
         "speech_start_safety": SPEECH_START_SAFETY,
         "render_fps_estimate": round(render_fps_estimate, 3),

@@ -174,12 +174,18 @@ services:
       PHRASE_MIN_FIRST_CHARS: "${AVATAR_PHRASE_MIN_FIRST_CHARS:-24}"
       PHRASE_TARGET_CHARS: "${AVATAR_PHRASE_TARGET_CHARS:-100}"
       PHRASE_MAX_CHARS: "${AVATAR_PHRASE_MAX_CHARS:-160}"
+      # Render warping_spade with ONNX Runtime's TensorRT provider in FP16
+      # (~27 ms vs ~97 ms per frame on the RTX 5080). The first start builds
+      # engines into the cache below (~30 s); later starts reuse them.
+      AVATAR_TENSORRT: "${AVATAR_TENSORRT:-true}"
+      AVATAR_TENSORRT_CACHE: /workspace/trt-cache
       # For remote/NAT clients, set a TURN server JSON array here.
       ICE_SERVERS_JSON: "[]"
     volumes:
       - ./inputs:/workspace/inputs:ro
       - ./checkpoints:/workspace/FasterLivePortrait/checkpoints:ro
       - ./results:/workspace/results
+      - ./models/trt-cache:/workspace/trt-cache
     depends_on:
       model-init:
         condition: service_completed_successfully
