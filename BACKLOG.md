@@ -92,9 +92,26 @@ Later:
 - **Nightly LLM review**: an LLM reads the day's conversations and corrections,
   flags where a conversation went wrong, proposes new categories and phrases,
   and prepares training data for System 1 and improvements for the RAG.
-- **Stronger knowledge systems** behind the same `Knowledge` interface: graph
-  RAG, wiki import, existing documents (PDF/Word/Confluence), and eventually
-  research agents and vision (the avatar looking at what the user shows).
+- **Searching beyond the knowledge folder** (user, 2026-09-30; the project was
+  started with a research option in mind, and the user wants several of these
+  available side by side). Today System 2 only searches `knowledge/`; the topic
+  of an unanswered question is extracted but only used in the "I don't know"
+  reply and the review. Each option below is a `Knowledge` implementation, and
+  they can be chained (folder first, then the next source):
+  - **Offline Wikipedia**: a local English + Dutch extract (a compact abstracts
+    version is a few GB), fully on the VM, for general knowledge.
+  - **Self-built topic wiki**: a wiki on a chosen subject that the user curates
+    (possibly seeded from the review's page suggestions or from Wikipedia
+    pages on that subject), indexed like the knowledge folder.
+  - **Web search**: most complete and current, but the question leaves the VM
+    (departs from "local only") and needs a search API key; could be opt-in
+    per topic.
+  - **Research agent**: plans searches, reads pages and combines sources over
+    several steps; slow (seconds to minutes), needs a stronger LLM than Llama
+    3.2 3B and internet access; the avatar would say it is looking into it and
+    answer later.
+  - Also: graph RAG, importing existing documents (PDF/Word/Confluence), and
+    vision (the avatar looking at what the user shows).
 - **Pre-rendered reaction phrases**: cache TTS audio + rendered motion for the
   fixed phrases so they play instantly.
 - **Reply in Dutch** when spoken to in Dutch: Chatterbox Multilingual (already
