@@ -78,6 +78,11 @@ Later:
 - **Compare other System 1 models** against JevK5 as they appear (JevBench
   lists Cygnet and Winnow-12B at the top, too large for our GPU today; JevK5-9B,
   Plumb-4B and decider-4b are closer in size).
+- **Smaller, faster System 1** (user, 2026-09-30): JevK5 4B added latency
+  (~170-300 ms per decision vs ~120 ms for Laya on the CPU) and uses 3.4 GB of
+  GPU. Try JevK5 2B (v0.2 Q8_0 GGUF) or the DeBERTa-based JevK5-Lite, trained on
+  this avatar's own classes and corrections, and compare with
+  `tools/eval_system1.py` (accuracy, latency, memory) before switching.
 - **Fine-tune JevK5 (LoRA)** on the collected corrections once there are enough
   (e.g. 30+ new ones): pause the avatar, train on the full GPU (its
   `training/lora.py`, rank 16), convert to GGUF, deploy only if it beats the
