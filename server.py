@@ -56,7 +56,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2u-system1"
+SERVER_BUILD = "neural-avatar-v2v-system2"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -225,6 +225,15 @@ if AVATAR_LIP_MOTION_MODE not in {"absolute", "relative"}:
 AVATAR_LIP_SYNC_OFFSET_MS = float(os.getenv("AVATAR_LIP_SYNC_OFFSET_MS", "0"))
 if not -500.0 <= AVATAR_LIP_SYNC_OFFSET_MS <= 500.0:
     raise ValueError("AVATAR_LIP_SYNC_OFFSET_MS must be between -500 and 500")
+# During pauses the audio track sends this very quiet noise instead of digital
+# silence. Laptop audio chips power the speaker amplifier down after a few
+# seconds of silence and clip the first few hundred ms when sound resumes
+# ("Great, then we agree." was heard as "then we agree."). -60 dBFS is far
+# below anything audible in a room. "off" sends plain silence.
+_KEEPALIVE = os.getenv("AVATAR_AUDIO_KEEPALIVE_DBFS", "-60").strip().lower()
+AUDIO_KEEPALIVE_AMPLITUDE = (
+    0.0 if _KEEPALIVE in {"off", "none", ""} else 32767 * 10 ** (float(_KEEPALIVE) / 20)
+)
 # FasterLivePortrait's own "eyes" and "lip" animation-region keypoints.
 EYE_EXPRESSION_INDICES = [11, 13, 15, 16, 18]
 LIP_EXPRESSION_INDICES = [6, 12, 14, 17, 19, 20]
@@ -855,12 +864,22 @@ class AvatarVideoTrack(VideoStreamTrack):
         return frame
 
 
+def keepalive_noise(samples: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Replace an all-zero audio chunk with inaudible noise (see
+    AUDIO_KEEPALIVE_AMPLITUDE); real audio passes through untouched."""
+    if AUDIO_KEEPALIVE_AMPLITUDE <= 0 or samples.any():
+        return samples
+    noise = rng.normal(0.0, AUDIO_KEEPALIVE_AMPLITUDE, samples.shape)
+    return np.clip(np.round(noise), -32768, 32767).astype(np.int16)
+
+
 class AvatarAudioTrack(AudioStreamTrack):
     def __init__(self, playback: PlaybackBuffer) -> None:
         super().__init__()
         self.playback = playback
         self._start: float | None = None
         self._timestamp = 0
+        self._rng = np.random.default_rng()
 
     async def recv(self) -> AudioFrame:
         if self._start is None:
@@ -871,7 +890,9 @@ class AvatarAudioTrack(AudioStreamTrack):
             await asyncio.sleep(max(0, target - time.time()))
 
         frame = AudioFrame.from_ndarray(
-            self.playback.next_audio(), format="s16", layout="mono"
+            keepalive_noise(self.playback.next_audio(), self._rng),
+            format="s16",
+            layout="mono",
         )
         frame.sample_rate = AUDIO_RATE
         frame.pts = self._timestamp
@@ -2109,6 +2130,7 @@ async def health() -> JSONResponse:
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
+        "audio_keepalive_dbfs": _KEEPALIVE,
         "listener_enabled": bool(LISTENER_SOCKET),
         "conductor_enabled": bool(CONDUCTOR_SOCKET),
         "crop_rotation": AVATAR_CROP_ROTATION,
@@ -2229,12 +2251,22 @@ async def offer(request: Request) -> JSONResponse:
             if conductor is not None:
                 await conductor.on_avatar_speaking(False)
 
+    say_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def speak_queued() -> None:
+        """Speak the conductor's lines in order, e.g. a filler then the answer."""
+        while True:
+            text = await say_queue.get()
+            while playback.busy:  # typed text may still be playing
+                await asyncio.sleep(0.05)
+            await speak(text, TTS_INSTRUCTION, TTS_DEFAULT_VOICE_MODE)
+
     class PeerOutput:
         """`AvatarOutput` for this browser session."""
 
         async def say(self, text: str) -> None:
-            if text and not playback.busy:
-                run_job(speak(text, TTS_INSTRUCTION, TTS_DEFAULT_VOICE_MODE))
+            if text:
+                await say_queue.put(text)
 
         async def show(self, state: dict[str, Any]) -> None:
             channel = peer_channel.get("channel")
@@ -2242,6 +2274,7 @@ async def offer(request: Request) -> JSONResponse:
                 await _send_event(channel, "conversation", **state)
 
     if conductor is not None:
+        run_job(speak_queued())
         await conductor.start(PeerOutput())
 
     async def forward_transcript(event: TranscriptEvent) -> None:

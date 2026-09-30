@@ -107,6 +107,14 @@ Later:
 - **System 1 accuracy**: zero-shot intent 11/16, emotion weak; corrections and
   the nightly fine-tuning (M5) are meant to fix this.
 
+## Audio
+
+- **Bluetooth headphones play nothing once the microphone is enabled** (user,
+  2026-09-30): the headset likely switches to its call profile / another output
+  device. Worked around by using the laptop speakers; investigate (e.g. a
+  separate output device choice in the page, or push-to-talk only opening the
+  microphone while held).
+
 ## Avatar quality
 
 - JoyVASA's mouth follows individual syllables only loosely (correlation with

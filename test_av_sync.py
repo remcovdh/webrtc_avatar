@@ -119,6 +119,18 @@ class AudioClockedVideoTests(unittest.TestCase):
             server.AVATAR_LIP_SYNC_OFFSET_MS = original
 
 
+class KeepaliveNoiseTests(unittest.TestCase):
+    def test_silence_becomes_inaudible_noise_and_speech_is_untouched(self) -> None:
+        rng = np.random.default_rng(0)
+        silence = np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
+        noise = server.keepalive_noise(silence, rng)
+        self.assertTrue(noise.any())
+        rms_dbfs = 20 * np.log10(np.sqrt(np.mean(noise.astype(float) ** 2)) / 32767)
+        self.assertLess(rms_dbfs, -55)
+        speech = np.full((1, AUDIO_SAMPLES), 1000, dtype=np.int16)
+        self.assertIs(server.keepalive_noise(speech, rng), speech)
+
+
 class SpeechStartGateTests(unittest.TestCase):
     def test_slow_render_holds_speech_until_enough_video_exists(self) -> None:
         playback = PlaybackBuffer()

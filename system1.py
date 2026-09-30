@@ -114,16 +114,23 @@ def _plain(text: str) -> str:
 def keyword_fields(text: str, rules: list[dict[str, Any]]) -> dict[str, str]:
     """Fields decided by the first matching keyword rule (whole words).
 
-    A rule's `max_words` limits it to short utterances: "Hallo" makes "Hallo!"
-    a greeting, but not "Hallo, kun je me vertellen wat een ballon is?"."""
+    A rule matches on `words` anywhere, `starts` (the utterance's first words)
+    or `ends` (its last characters, e.g. "?"). `max_words` limits it to short
+    utterances: "Hallo" makes "Hallo!" a greeting, but not "Hallo, kun je me
+    vertellen wat een ballon is?"."""
     plain = _plain(text)
     length = len(plain.split())
+    stripped = text.strip()
     for rule in rules:
         if length > rule.get("max_words", 10_000):
             continue
-        for phrase in rule.get("words", []):
-            if _plain(phrase) in plain:
-                return {name: value for name, value in rule.items() if name in FIELDS}
+        matched = (
+            any(_plain(phrase) in plain for phrase in rule.get("words", []))
+            or any(plain.startswith(_plain(phrase)) for phrase in rule.get("starts", []))
+            or any(stripped.endswith(end) for end in rule.get("ends", []))
+        )
+        if matched:
+            return {name: value for name, value in rule.items() if name in FIELDS}
     return {}
 
 
@@ -317,15 +324,19 @@ class Reactions:
         self._counters: dict[str, itertools.count] = {}
 
     def pick(self, decision: Decision) -> str | None:
+        return self.pick_for((f"{decision.intent}+{decision.emotion}", decision.intent), decision.topic)
+
+    def pick_for(self, keys: Sequence[str], topic: str | None) -> str | None:
+        """A phrase from the first key with phrases (e.g. "unknown")."""
         reactions = self.config.get().get("reactions", {})
-        for key in (f"{decision.intent}+{decision.emotion}", decision.intent):
+        for key in keys:
             options = reactions.get(key, [])
             # Naming the topic is what makes the avatar sound like it
             # understood, so phrases with {topic} win whenever there is one.
             with_topic = [p for p in options if "{topic}" in p]
             without_topic = [p for p in options if "{topic}" not in p]
-            chosen = with_topic if decision.topic and with_topic else without_topic
-            phrases = [p.replace("{topic}", decision.topic or "") for p in chosen]
+            chosen = with_topic if topic and with_topic else without_topic
+            phrases = [p.replace("{topic}", topic or "") for p in chosen]
             if phrases:
                 index = next(self._counters.setdefault(key, itertools.count()))
                 return phrases[index % len(phrases)]

@@ -38,7 +38,9 @@ TURN_CONNECTIVE_MS = int(os.getenv("TURN_CONNECTIVE_MS", "1200"))
 LISTENER_SILENCE_MS = int(os.getenv("LISTENER_MIN_SILENCE_MS", "300"))
 # Push-to-talk: how long to wait for the last utterance's final text.
 PTT_FINAL_WAIT_MS = int(os.getenv("PTT_FINAL_WAIT_MS", "1500"))
+# "system1" = System 1 reactions + System 2 answers; "echo" = the M2 echo.
 RESPONDER = os.getenv("CONDUCTOR_RESPONDER", "system1").strip().lower()
+SYSTEM2_ENABLED = os.getenv("SYSTEM2_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 CONNECTIVES = {
     word.strip().lower()
     for word in os.getenv(
@@ -193,8 +195,14 @@ class TurnTaker:
 
 class Responder(Protocol):
     def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
-        """The avatar's reply (or None) and details for the log and the page.
-        Blocking is fine: the conductor calls it in a worker thread."""
+        """The avatar's quick reply (or None) and details for the log and the
+        page. If `detail["needs_answer"]` is set, `answer` follows and the reply
+        is only used as a filler while it runs. Blocking is fine: the conductor
+        calls both in a worker thread."""
+        ...
+
+    def answer(self, turn: Turn, detail: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+        """The considered answer (System 2) and its details."""
         ...
 
     def correct(self, text: str, fields: dict[str, str]) -> None:
@@ -208,26 +216,63 @@ class EchoResponder:
     def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
         return f"You said: {turn.text}", {}
 
+    def answer(self, turn: Turn, detail: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+        return None, {}
+
     def correct(self, text: str, fields: dict[str, str]) -> None:
         pass
 
 
-class System1Responder:
-    """M3: react with a phrase chosen from System 1's typed decision."""
+class ConversationResponder:
+    """System 1 reacts at once; questions and requests get a System 2 answer
+    from the knowledge folder (M4). Each part is injectable for tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, system1: Any = None, knowledge: Any = None, system2: Any = None) -> None:
         from system1 import LayaSystem1, Reactions
 
-        self.system1 = LayaSystem1()
-        self.system1.warm_up()
-        self.reactions = Reactions(self.system1.config)
+        if system1 is None:
+            system1 = LayaSystem1()
+            system1.warm_up()
+        self.system1 = system1
+        self.reactions = Reactions(system1.config)
+        if knowledge is None and SYSTEM2_ENABLED:
+            from knowledge import MarkdownKnowledge
+
+            knowledge = MarkdownKnowledge()
+            knowledge.search("warm-up")
+        if system2 is None and SYSTEM2_ENABLED:
+            from system2 import LlamaSystem2
+
+            system2 = LlamaSystem2()
+            system2.warm_up()
+        self.knowledge, self.system2 = knowledge, system2
 
     def reply(self, turn: Turn, language: str) -> tuple[str | None, dict[str, Any]]:
         decision = self.system1.decide(turn.text, language)
         return self.reactions.pick(decision), {
             "decision": decision.to_dict(),
             "options": self.system1.options(),
+            "needs_answer": decision.needs_system2 and self.knowledge is not None,
         }
+
+    def answer(self, turn: Turn, detail: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+        settings = self.system1.config.get().get("system2", {})
+        topic = detail.get("decision", {}).get("topic")
+        started = time.perf_counter()
+        passages = self.knowledge.search(turn.text, int(settings.get("passages", 3)))
+        search_ms = round((time.perf_counter() - started) * 1000)
+        relevant = [p for p in passages if p.score >= float(settings.get("min_score", 0.8))]
+        info: dict[str, Any] = {
+            "retrieved": [p.to_dict() for p in passages],
+            "search_ms": search_ms,
+        }
+        if not relevant:
+            # Nothing to rephrase: say so honestly, without asking the LLM.
+            info["knowledge_gap"] = True
+            return self.reactions.pick_for(("unknown",), topic), info
+        text, llm = self.system2.answer(turn.text, relevant)
+        info["llm"] = llm
+        return text or self.reactions.pick_for(("unknown",), topic), info
 
     def correct(self, text: str, fields: dict[str, str]) -> None:
         self.system1.correct(text, fields)
@@ -310,6 +355,11 @@ class Session:
         except Exception:
             LOG.exception("Responder failed; staying silent this turn")
             reply, detail = None, {"error": "responder failed"}
+        filler = None
+        if detail.get("needs_answer"):
+            reply, filler, answer_detail = await self._answer(turn, detail, reply)
+            detail.update(answer_detail)
+            detail["filler"] = filler
         record = {
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "session": self.id,
@@ -325,6 +375,25 @@ class Session:
         await self.send({"type": "show", "state": {"turn": record}})
         if reply:
             await self.send({"type": "say", "text": reply})
+
+    async def _answer(
+        self, turn: Turn, detail: dict[str, Any], filler: str | None
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        """Run System 2; say the filler first if the answer is slow."""
+        settings = getattr(getattr(self.responder, "system1", None), "config", None)
+        wait_ms = (settings.get().get("system2", {}).get("filler_after_ms", 600) if settings else 600)
+        task = asyncio.ensure_future(asyncio.to_thread(self.responder.answer, turn, detail))
+        done, _ = await asyncio.wait({task}, timeout=wait_ms / 1000)
+        said_filler = None
+        if not done and filler:
+            said_filler = filler
+            await self.send({"type": "say", "text": filler})
+        try:
+            answer, answer_detail = await task
+        except Exception:
+            LOG.exception("System 2 failed")
+            return None, said_filler, {"error": "system2 failed"}
+        return answer, said_filler, answer_detail
 
     async def _update_state(self) -> None:
         t = self.turns
@@ -390,7 +459,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     # One responder for all sessions: its models load once.
-    responder = System1Responder() if RESPONDER == "system1" else EchoResponder()
+    responder = ConversationResponder() if RESPONDER == "system1" else EchoResponder()
     asyncio.run(serve(lambda: responder))
 
 

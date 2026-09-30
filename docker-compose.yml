@@ -88,6 +88,8 @@ services:
       dockerfile: Dockerfile
       target: conductor
     image: neural-avatar-conductor:latest
+    # System 2's small LLM runs in-process with llama.cpp on the GPU.
+    gpus: all
     environment:
       CONDUCTOR_SOCKET: /run/avatar/conductor.sock
       # Silence that ends the user's turn: ends in ?/./! / otherwise / after a
@@ -102,7 +104,13 @@ services:
       SYSTEM1_CONFIG: /workspace/config/system1.json
       SYSTEM1_MEMORY: /workspace/results/system1/corrections.jsonl
       SYSTEM1_DEVICE: "${SYSTEM1_DEVICE:-cpu}"
+      # M4: System 2 answers questions from ./knowledge (Markdown, re-indexed
+      # on change) with a small 4-bit LLM ("<hf repo>::<gguf file>").
+      SYSTEM2_ENABLED: "${SYSTEM2_ENABLED:-true}"
+      SYSTEM2_MODEL: "${SYSTEM2_MODEL:-bartowski/Llama-3.2-3B-Instruct-GGUF::Llama-3.2-3B-Instruct-Q4_K_M.gguf}"
+      KNOWLEDGE_DIR: /workspace/knowledge
     volumes:
+      - ./knowledge:/workspace/knowledge:ro
       - avatar-run:/run/avatar
       - ./results:/workspace/results
       # Folder mount (not the file) so editors that replace the file still
@@ -185,6 +193,9 @@ services:
       # mouth leads the loudness by ~40-160 ms; +80 felt right in the browser
       # and made the browser's audio/video buffers nearly equal (53/66 ms).
       AVATAR_LIP_SYNC_OFFSET_MS: "${AVATAR_LIP_SYNC_OFFSET_MS:-80}"
+      # Inaudible noise instead of digital silence between sentences, so laptop
+      # speaker amplifiers do not power down and clip the next first word.
+      AVATAR_AUDIO_KEEPALIVE_DBFS: "${AVATAR_AUDIO_KEEPALIVE_DBFS:--60}"
       # FLP rotated the source crop to straighten the face, which tilted the
       # whole frame and showed black wedges. false keeps the crop upright.
       AVATAR_CROP_ROTATION: "${AVATAR_CROP_ROTATION:-false}"
@@ -211,8 +222,11 @@ services:
       # A generated Breeze sentence or an owned/licensed WAV can be the preset.
       # Preset modes become selectable only when both the WAV and its exact
       # transcript file exist in ./inputs.
-      BREEZE_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset.wav}"
-      BREEZE_PRESET_TRANSCRIPT_FILE: "${AVATAR_PRESET_TRANSCRIPT_FILE:-/workspace/inputs/voice-preset.txt}"
+      # The reference recording without its opening "Hello,": Chatterbox Turbo
+      # continued the reference sentence ("Hello, I am your friendly virtual
+      # assistant...") whenever a reply also started with "Hello".
+      BREEZE_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset-nohello.wav}"
+      BREEZE_PRESET_TRANSCRIPT_FILE: "${AVATAR_PRESET_TRANSCRIPT_FILE:-/workspace/inputs/voice-preset-nohello.txt}"
       # Optional alternative to the .txt file; leave empty to read the file.
       BREEZE_PRESET_TRANSCRIPT: ""
       # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the

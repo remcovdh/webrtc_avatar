@@ -1,3 +1,30 @@
+# neural-avatar-v2v-system2
+
+## v2V System 2 answers (milestone M4 of `LISTENING_PLAN.md`) and audio fixes
+
+- `knowledge.py` (`Knowledge` interface): the Markdown pages in `knowledge/`
+  are split per heading and embedded with multilingual-e5-small on the CPU;
+  re-indexed on change. Retrieval threshold 0.8 (answerable questions scored
+  0.83-0.90, unanswerable 0.71-0.77).
+- `system2.py` (`System2` interface): Llama 3.2 3B Instruct (Q4_K_M) through
+  llama.cpp in the conductor (compiled for sm_120), only rephrasing retrieved
+  passages into 1-3 spoken English sentences. Chosen over Qwen3 4B (too long
+  for speech) and Phi-4-mini (answered Dutch questions in Dutch); median 260 ms.
+- No relevant passage: an honest "I don't know" without calling the LLM,
+  logged as a knowledge gap. A filler phrase is spoken first only if the answer
+  takes longer than 600 ms; the avatar speaks queued lines in order.
+- Keyword rules now catch question and request starters (EN/NL) and a trailing
+  "?": Laya missed short questions whose "?" the ASR dropped.
+- Fix: the reference voice recording started with "Hello, I am your friendly
+  virtual assistant"; any reply starting with "Hello" made Chatterbox Turbo
+  speak that sentence instead. The preset is now the same recording without
+  "Hello," (`inputs/voice-preset-nohello.wav`).
+- Fix: laptop speaker amplifiers powered down during digital silence and cut
+  the first word of the next sentence. Pauses now carry inaudible noise
+  (`AVATAR_AUDIO_KEEPALIVE_DBFS`, -60).
+- The page shows the knowledge source of each answer, a meter for avatar sound
+  arriving in the browser, and a "Test speakers" button.
+
 # neural-avatar-v2u-system1
 
 ## v2U System 1 reactions (milestone M3 of `LISTENING_PLAN.md`)

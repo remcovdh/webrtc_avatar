@@ -45,6 +45,7 @@ results/motion-dumps/
 results/listener-test/
 results/conversations/
 results/system1/
+results/*.wav
 
 # Jupyter Notebooks
 .ipynb_checkpoints

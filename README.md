@@ -1,6 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2u-system1`
+Current build: `neural-avatar-v2v-system2`
+
+## v2V answers from your knowledge folder
+
+Build `neural-avatar-v2v-system2` answers questions from the Markdown pages in `knowledge/` with a
+small local LLM (Llama 3.2 3B), and says so honestly when the pages don't
+cover a question. Add pages by copying `knowledge/_template.md`; changes apply
+on the next question. See `knowledge/README.md` and `RELEASE.md`.
 
 ## v2U System 1 reactions
 

@@ -89,3 +89,21 @@ Each milestone is its own version with its own explanation and commit.
   Keyword rules are limited to short utterances (`max_words`), after "Hallo,
   ... kun je me vertellen wat een ballon is?" was wrongly taken as a greeting.
   Corrections from the page apply at once (verified end to end).
+- **M4 done (v2V, 2026-09-30).** The user tested it; testing also exposed two
+  audio problems, both fixed in v2V (a reference voice starting with "Hello",
+  and laptop amplifiers clipping the first word after silence). `knowledge.py`
+  (`MarkdownKnowledge`: sections per heading, multilingual-e5-small on the CPU,
+  re-indexed on change) and `system2.py` (`LlamaSystem2`: llama.cpp in the
+  conductor, compiled for sm_120). Retrieval scores: answerable questions
+  0.834-0.904, unanswerable 0.706-0.767, so `min_score` 0.8. LLM comparison
+  on the same questions: Llama 3.2 3B chosen (median 260 ms, 2.6 GB, short,
+  always English); Qwen3 4B richer but too long for speech (539 ms, 3.5 GB);
+  Phi-4-mini answered Dutch questions in Dutch. All three said "I don't know"
+  for a related question the notes could not answer. Laya classified short
+  questions without "?" wrongly (e.g. "Why is the avatar so fast" as
+  disagreement), so keyword rules now catch question and request starters
+  (EN/NL) and a trailing "?". End to end: answer spoken 1.85 s after the last
+  word; a knowledge gap gets an honest "I don't know" without the LLM. The
+  answer is spoken as one clip (smoother than sentence-by-sentence clips); a
+  filler is spoken first only when the answer takes longer than 600 ms. GPU in
+  total 11.1 of 16.3 GB.

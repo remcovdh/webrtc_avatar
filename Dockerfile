@@ -98,9 +98,14 @@ WORKDIR /workspace
 RUN python -m pip install "laya==0.3.20" "spacy==3.8.16" "yake==0.7.3" "rapidfuzz==3.14.6" \
       "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
       "nl_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl"
-COPY conversation_protocol.py listener_protocol.py conductor.py forget.py system1.py test_conductor.py test_system1.py /workspace/
+# System 2 (M4): llama.cpp in-process for a small 4-bit LLM, compiled for the
+# RTX 50-series only (sm_120) to keep the build short; sentence-transformers
+# for CPU retrieval embeddings over the knowledge folder.
+RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120" \
+      python -m pip install "llama-cpp-python==0.3.35" "sentence-transformers==6.1.0"
+COPY conversation_protocol.py listener_protocol.py conductor.py forget.py system1.py knowledge.py system2.py test_conductor.py test_system1.py test_system2.py /workspace/
 COPY config/system1.json /workspace/config/system1.json
-RUN python -m unittest -v test_conductor.py test_system1.py
+RUN python -m unittest -v test_conductor.py test_system1.py test_system2.py
 CMD ["python", "/workspace/conductor.py"]
 
 

@@ -21,15 +21,18 @@
     "neutral": "calm, matter-of-fact, no particular emotion"
   },
 
-  "_keyword_rules": "Words heard by the ASR that decide a field outright (whole words, case-insensitive). max_words limits a rule to short utterances, so 'Hallo, kun je me vertellen...' stays a question. The correction memory still wins over these rules.",
+  "_keyword_rules": "Words heard by the ASR that decide a field outright (case-insensitive; the first matching rule wins). 'words' match anywhere, 'starts' at the start of the utterance, 'ends' at its end. max_words limits a rule to short utterances, so 'Hallo, kun je me vertellen...' stays a question. Laya missed questions whose '?' the ASR dropped ('Why is the avatar so fast' became 'disagreement'), hence the question and request starters. The correction memory still wins over these rules.",
   "keyword_rules": [
+    {"starts": ["can you", "could you", "would you", "will you", "please tell", "tell me", "kun je", "kan je", "kunt u", "wil je", "zou je", "vertel"], "intent": "request"},
+    {"starts": ["what", "why", "how", "who", "where", "when", "which", "is it", "are there", "do you", "does", "wat", "waarom", "hoe", "wie", "waar", "wanneer", "welke", "is het", "zijn er", "heb je", "weet je"], "intent": "question"},
+    {"ends": ["?"], "intent": "question"},
     {"words": ["stop", "wacht even", "hou op", "be quiet", "shut up", "hold on"], "intent": "stop", "max_words": 8},
     {"words": ["thank you", "thanks", "dank je", "dankjewel", "bedankt"], "intent": "thanks", "max_words": 6},
     {"words": ["goodbye", "bye", "see you", "tot ziens", "doei", "dag dag"], "intent": "farewell", "max_words": 6},
     {"words": ["hello", "hi there", "good morning", "hallo", "goedemorgen", "goedemiddag"], "intent": "greeting", "max_words": 6}
   ],
 
-  "_system2_intents": "Intents that need a real answer from System 2 (M4); until then the avatar says it cannot answer yet.",
+  "_system2_intents": "Intents that get a real answer from System 2 (knowledge folder + small LLM).",
   "system2_intents": ["question", "request"],
 
   "_watch_words": "Words that should always become the topic when heard (fuzzy-matched to tolerate ASR spelling).",
@@ -53,7 +56,11 @@
     "remark+angry": ["Sorry about that. I'll try to do better."],
     "remark+sad": ["I'm sorry to hear that."],
     "remark+surprised": ["Surprising, isn't it?"],
-    "question": ["Good question about {topic}. I can't look that up yet, but soon I can.", "Good question. I can't answer that yet, but soon I can."],
-    "request": ["I'd like to help with {topic}, but I can't look that up yet.", "I can't do that yet, but soon I can."]
-  }
+    "question": ["Good question about {topic}, let me think.", "Good question, let me think.", "Let me see."],
+    "request": ["Let me check what I know about {topic}.", "Let me see what I know about that."],
+    "unknown": ["Sorry, I don't know anything about {topic} yet.", "I don't know that yet.", "That's not something I know about yet."]
+  },
+
+  "_system2": "Questions and requests (system2_intents) are answered from the knowledge folder. min_score: the best passage's retrieval score must reach this, otherwise the avatar says an 'unknown' phrase without asking the LLM. filler_after_ms: if the answer takes longer, the intent's phrase above is said first as a filler.",
+  "system2": {"min_score": 0.8, "passages": 3, "filler_after_ms": 600}
 }

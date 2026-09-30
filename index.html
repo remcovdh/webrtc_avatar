@@ -100,6 +100,7 @@
           </table>
         </div>
       </section>
+      <div class="listen-head"><button id="beepBtn" class="secondary" title="Plays a short tone through this browser's audio output, without WebRTC">Test speakers</button><span class="details">Avatar sound arriving in this browser</span><div class="meter" aria-hidden="true"><span id="avatarLevel"></span></div></div>
       <div class="details" id="syncDetails">Browser A/V buffers appear once media flows</div>
       <div class="details" id="runtimeDetails">The first phrase plays as soon as it is ready while later phrases are generated.</div>
     </section>
@@ -161,12 +162,20 @@
       facts.textContent = `topic: ${d.topic || "–"} · System 2: ${d.needs_system2 ? "yes" : "no"} · ${d.latency_ms} ms`;
       row.appendChild(facts);
       const reply = document.createElement("div");
-      reply.textContent = `Reply: ${turn.reply || "(none)"}`;
+      reply.textContent = `Reply: ${turn.filler ? `“${turn.filler}” then ` : ""}${turn.reply || "(none)"}`;
+      const knowledge = document.createElement("div");
+      knowledge.className = "muted";
+      const best = turn.retrieved?.[0];
+      if (turn.knowledge_gap) {
+        knowledge.textContent = `Knowledge gap: nothing relevant in the knowledge folder (best ${best ? `${best.source} ${best.score}` : "none"}); logged for review.`;
+      } else if (turn.llm) {
+        knowledge.textContent = `Answered from ${turn.retrieved.filter(p => p.score >= 0).slice(0, 2).map(p => `${p.source} (${p.score})`).join(", ")} · ${turn.llm.model} ${turn.llm.llm_ms} ms`;
+      }
       const note = document.createElement("div");
       note.className = "muted";
       note.id = "correctionNote";
       note.textContent = `Sources: intent ${d.sources?.intent}, emotion ${d.sources?.emotion}. Change a class to correct it.`;
-      decisionBox.append(heard, row, reply, note);
+      decisionBox.append(heard, row, reply, knowledge, note);
     }
     function showConversation(message) {
       if (message.turn) showDecision(message.turn);
@@ -471,9 +480,47 @@
     textInput.addEventListener("keydown", event => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") sendText();
     });
+    // Level of the avatar's audio as received by this browser. If it moves
+    // but nothing is heard, the sound is lost after the browser (muted tab,
+    // output device, Bluetooth headset switching to call mode, OS ducking).
+    function meterAvatarAudio() {
+      const track = stream.getAudioTracks()[0];
+      if (!track) return;
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      context.createMediaStreamSource(new MediaStream([track])).connect(analyser);
+      const samples = new Float32Array(analyser.fftSize);
+      const avatarLevel = document.querySelector("#avatarLevel");
+      const draw = () => {
+        analyser.getFloatTimeDomainData(samples);
+        const rms = Math.sqrt(samples.reduce((sum, v) => sum + v * v, 0) / samples.length);
+        avatarLevel.style.width = `${Math.min(100, rms * 400)}%`;
+        requestAnimationFrame(draw);
+      };
+      draw();
+    }
+    document.querySelector("#beepBtn").addEventListener("click", async () => {
+      const context = new AudioContext();
+      await context.resume();
+      const tone = context.createOscillator();
+      const gain = context.createGain();
+      gain.gain.value = 0.2;
+      tone.frequency.value = 660;
+      tone.connect(gain).connect(context.destination);
+      tone.start();
+      tone.stop(context.currentTime + 0.6);
+      tone.onended = () => context.close();
+      setStatus(`Test tone played (${context.sampleRate} Hz output). Avatar audio element: ${video.muted ? "muted" : "unmuted"}, volume ${video.volume}, ${video.paused ? "paused" : "playing"}`);
+    });
     audioBtn.addEventListener("click", async () => {
       video.muted = false;
-      try { await video.play(); audioBtn.textContent = "Audio enabled"; audioBtn.disabled = true; }
+      video.volume = 1;
+      try {
+        await video.play();
+        audioBtn.textContent = "Audio enabled"; audioBtn.disabled = true;
+        meterAvatarAudio();
+      }
       catch (error) { setStatus(`Could not enable audio: ${error.message}`, "bad"); }
     });
     window.addEventListener("beforeunload", () => pc?.close());

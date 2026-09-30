@@ -59,7 +59,8 @@ class System1Tests(unittest.TestCase):
         return LayaSystem1(self.config, self.memory, agent or FakeAgent(), bag_of_words, NoTopics())
 
     def test_laya_answers_when_nothing_else_knows(self) -> None:
-        d = self.make(FakeAgent("question", "neutral")).decide("Hoe laat is het?", "nl-NL")
+        # Not a question by its words, so Laya decides.
+        d = self.make(FakeAgent("question", "neutral")).decide("Ik vraag me af hoe laat het is", "nl-NL")
         self.assertEqual((d.intent, d.emotion, d.language), ("question", "neutral", "nl"))
         self.assertTrue(d.needs_system2)
         self.assertEqual(d.sources, {"intent": "laya", "emotion": "laya"})
@@ -79,7 +80,7 @@ class System1Tests(unittest.TestCase):
         similar = system1.decide("Kun je iets over het weer van morgen vertellen?", "nl-NL")
         self.assertEqual(similar.intent, "request")
         self.assertTrue(similar.sources["intent"].startswith("memory"))
-        other = system1.decide("What is your name?", "en-US")
+        other = system1.decide("Your name sounds nice", "en-US")
         self.assertEqual((other.intent, other.sources["intent"]), ("greeting", "laya"))
 
     def test_corrections_survive_a_restart_and_invalid_classes_are_ignored(self) -> None:
@@ -114,6 +115,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(keyword_fields("Hallo!", rules), {"intent": "greeting"})
         self.assertEqual(keyword_fields("Hallo, kun je me vertellen wat een ballon is?", rules), {})
 
+    def test_questions_and_requests_are_caught_without_a_question_mark(self) -> None:
+        rules = json.loads(CONFIG.read_text())["keyword_rules"]
+        self.assertEqual(keyword_fields("Why is the avatar so fast", rules), {"intent": "question"})
+        self.assertEqual(keyword_fields("Wat is de hoofdstad van Frankrijk", rules), {"intent": "question"})
+        self.assertEqual(keyword_fields("Can you tell me about Devoteam", rules), {"intent": "request"})
+        self.assertEqual(keyword_fields("Het werkt, toch?", rules), {"intent": "question"})
+        self.assertEqual(keyword_fields("Whatever you say", rules), {})
+
     def test_reactions_prefer_intent_and_emotion_and_skip_missing_topics(self) -> None:
         from system1 import Decision
 
@@ -121,7 +130,7 @@ class HelperTests(unittest.TestCase):
         joyful = Decision("x", "en", "remark", "joyful", False)
         self.assertEqual(reactions.pick(joyful), "Glad you like it!")
         no_topic = Decision("x", "en", "question", "neutral", True)
-        self.assertEqual(reactions.pick(no_topic), "Good question. I can't answer that yet, but soon I can.")
+        self.assertEqual(reactions.pick(no_topic), "Good question, let me think.")
         topic = Decision("x", "en", "question", "neutral", True, topic="ballon")
         self.assertIn("ballon", reactions.pick(topic))
 
