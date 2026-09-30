@@ -1,3 +1,25 @@
+# neural-avatar-v2w-jevk5-review
+
+## v2W JevK5 System 1 and the conversation review (milestone M5)
+
+- System 1 now uses JevK5 v0.3 4B (Qwen3.5-4B + LoRA, option-logit readout,
+  Apache-2.0) in-process with llama.cpp, behind a new `Decider` interface.
+  It replaced Laya after research: JevBench scores Laya multilingual at
+  Intelligence 2.4, and on our 18 Dutch/English utterances JevK5 got intent
+  15/18 and emotion 17/18 (Laya 11/16 and 4-9/16); 168 ms per utterance,
+  +3.4 GB GPU (total ~14.2 of 16.3 GB). The correction memory now uses the
+  multilingual-e5-small embeddings. torch must load before llama.cpp.
+- `review.py` / `./review.sh` (M5, manual): facts from the conversation logs
+  (counts, unsure decisions, corrections, knowledge gaps, turns that went
+  wrong: pushback or a repeated question) and suggestions from Qwen3 4B
+  (knowledge pages, class descriptions, new classes, diagnoses). Writes
+  `results/review/<time>.md` and `.json`; changes nothing itself. The script
+  pauses the avatar and TTS while the review model runs.
+- `tools/` keeps the test and measurement scripts and test audio in the repo
+  (they were lost twice in a cleared scratch folder); see `tools/README.md`.
+- Decided (see `LISTENING_PLAN.md`): no model training yet, manual review
+  only, voice emotion on the backlog.
+
 # neural-avatar-v2v-system2
 
 ## v2V System 2 answers (milestone M4 of `LISTENING_PLAN.md`) and audio fixes

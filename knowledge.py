@@ -75,6 +75,29 @@ def split_markdown(text: str, name: str) -> list[tuple[str, str]]:
     return passages
 
 
+_EMBEDDER: Callable[[Sequence[str], bool], np.ndarray] | None = None
+
+
+def load_embedder() -> Callable[[Sequence[str], bool], np.ndarray]:
+    """The shared CPU embedding model (also used by System 1's correction
+    memory), loaded once per process."""
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        from sentence_transformers import SentenceTransformer
+
+        started = time.perf_counter()
+        model = SentenceTransformer(EMBED_MODEL, device="cpu")
+        LOG.info("Embedding model %s loaded in %.1fs", EMBED_MODEL, time.perf_counter() - started)
+
+        def embed(texts: Sequence[str], is_query: bool) -> np.ndarray:
+            # E5 models expect these prefixes.
+            prefix = "query: " if is_query else "passage: "
+            return model.encode([prefix + t for t in texts], normalize_embeddings=True)
+
+        _EMBEDDER = embed
+    return _EMBEDDER
+
+
 class MarkdownKnowledge:
     def __init__(
         self,
@@ -90,18 +113,7 @@ class MarkdownKnowledge:
 
     @staticmethod
     def _load_model() -> Callable[[Sequence[str], bool], np.ndarray]:
-        from sentence_transformers import SentenceTransformer
-
-        started = time.perf_counter()
-        model = SentenceTransformer(EMBED_MODEL, device="cpu")
-        LOG.info("Embedding model %s loaded in %.1fs", EMBED_MODEL, time.perf_counter() - started)
-
-        def embed(texts: Sequence[str], is_query: bool) -> np.ndarray:
-            # E5 models expect these prefixes.
-            prefix = "query: " if is_query else "passage: "
-            return model.encode([prefix + t for t in texts], normalize_embeddings=True)
-
-        return embed
+        return load_embedder()
 
     def _files(self) -> list[Path]:
         return sorted(

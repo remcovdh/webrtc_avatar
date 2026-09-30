@@ -69,6 +69,7 @@ class LlamaSystem2:
     def __init__(self, model: str = MODEL, llm: Any = None) -> None:
         self.model = model
         if llm is None:
+            import torch  # noqa: F401  (load before llama.cpp, see system1.JevK5Decider)
             from huggingface_hub import hf_hub_download
             from llama_cpp import Llama
 

@@ -13,7 +13,7 @@ from conductor import ConversationResponder, Turn
 from knowledge import MarkdownKnowledge, Passage, split_markdown
 from system2 import LlamaSystem2, build_messages, clean_spoken
 from test_system1 import CONFIG, FakeAgent, NoTopics, bag_of_words
-from system1 import LayaSystem1
+from system1 import TypedSystem1
 
 VOCABULARY = ["tensorrt", "fast", "frame", "listen", "microphone", "privacy", "balloon"]
 
@@ -75,7 +75,7 @@ class ConversationResponderTests(unittest.TestCase):
         folder = Path(tempfile.mkdtemp())
         config = folder / "system1.json"
         shutil.copy(CONFIG, config)
-        system1 = LayaSystem1(config, folder / "corrections.jsonl", FakeAgent("question", "neutral"), bag_of_words, NoTopics())
+        system1 = TypedSystem1(config, folder / "corrections.jsonl", FakeAgent("question", "neutral"), bag_of_words, NoTopics())
         pages = folder / "knowledge"
         pages.mkdir()
         (pages / "a.md").write_text("# Avatar\n## Speed\nTensorRT makes every frame fast.\n")

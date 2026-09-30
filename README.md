@@ -1,6 +1,13 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2v-system2`
+Current build: `neural-avatar-v2w-jevk5-review`
+
+## v2W JevK5 and the conversation review
+
+Build `neural-avatar-v2w-jevk5-review` classifies what you say with JevK5 (far better than Laya, especially
+for emotions) and adds a review of past conversations: run `./review.sh` (it
+pauses the avatar for about a minute) and read the report in `results/review/`.
+Test and measurement scripts are in `tools/` (see `tools/README.md`).
 
 ## v2V answers from your knowledge folder
 

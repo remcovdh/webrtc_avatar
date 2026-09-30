@@ -228,10 +228,10 @@ class ConversationResponder:
     from the knowledge folder (M4). Each part is injectable for tests."""
 
     def __init__(self, system1: Any = None, knowledge: Any = None, system2: Any = None) -> None:
-        from system1 import LayaSystem1, Reactions
+        from system1 import TypedSystem1, Reactions
 
         if system1 is None:
-            system1 = LayaSystem1()
+            system1 = TypedSystem1()
             system1.warm_up()
         self.system1 = system1
         self.reactions = Reactions(system1.config)

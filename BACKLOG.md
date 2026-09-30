@@ -69,11 +69,21 @@ Later:
 - **Non-verbal reactions while listening**: nod, smile, raised eyebrows,
   interested look, driven by intent/emotion of what is said so far (< 300 ms).
   Needs facial motion without audio, which JoyVASA does not produce yet.
-- **Tone-of-voice emotion**: an audio encoder (e.g. an audio JEPA-style model)
-  so System 1 also hears laughter, sighs and anger that the words don't carry.
-- **Compare other System 1 models** against Laya: Von (claims sub-15 ms),
-  OpenJev (Jev-compatible API), and any others from the Jev wave.
-- **Fine-tune Laya** on the corrections collected through the feedback loop.
+- **Tone-of-voice emotion**: emotion from the audio itself, combined with
+  JevK5's text emotion. Candidates: emotion2vec+ (small, largely
+  language-independent speech emotion) and SenseVoice-Small (emotion plus
+  audio events such as laughter, crying, coughing; its ASR is not needed).
+  ~0.3-0.5 GB GPU; postponed (2026-09-30) because JevK5 text emotion is already
+  17/18 and GPU headroom goes to nightly training first.
+- **Compare other System 1 models** against JevK5 as they appear (JevBench
+  lists Cygnet and Winnow-12B at the top, too large for our GPU today; JevK5-9B,
+  Plumb-4B and decider-4b are closer in size).
+- **Fine-tune JevK5 (LoRA)** on the collected corrections once there are enough
+  (e.g. 30+ new ones): pause the avatar, train on the full GPU (its
+  `training/lora.py`, rank 16), convert to GGUF, deploy only if it beats the
+  current model on a held-out set. Decided 2026-09-30 to wait with this.
+- **Schedule the review** (e.g. a user crontab entry at 03:00) once the manual
+  review proves useful.
 - **Nightly LLM review**: an LLM reads the day's conversations and corrections,
   flags where a conversation went wrong, proposes new categories and phrases,
   and prepares training data for System 1 and improvements for the RAG.

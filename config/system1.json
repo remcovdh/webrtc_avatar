@@ -1,5 +1,5 @@
 {
-  "_comment": "System 1 classes and reactions. Edits take effect on the next turn, no restart needed. Criteria are Laya's zero-shot descriptions; order matters a little (the first measured emotion order made almost everything 'surprised').",
+  "_comment": "System 1 classes and reactions. Edits take effect on the next turn, no restart needed. Criteria are the zero-shot class descriptions JevK5 chooses between (up to 16 per question).",
 
   "intents": {
     "question": "asks a question or wants information or an explanation",
@@ -21,7 +21,7 @@
     "neutral": "calm, matter-of-fact, no particular emotion"
   },
 
-  "_keyword_rules": "Words heard by the ASR that decide a field outright (case-insensitive; the first matching rule wins). 'words' match anywhere, 'starts' at the start of the utterance, 'ends' at its end. max_words limits a rule to short utterances, so 'Hallo, kun je me vertellen...' stays a question. Laya missed questions whose '?' the ASR dropped ('Why is the avatar so fast' became 'disagreement'), hence the question and request starters. The correction memory still wins over these rules.",
+  "_keyword_rules": "Words heard by the ASR that decide a field outright (case-insensitive; the first matching rule wins). 'words' match anywhere, 'starts' at the start of the utterance, 'ends' at its end. max_words limits a rule to short utterances, so 'Hallo, kun je me vertellen...' stays a question. Laya (the first System 1 model) missed questions whose '?' the ASR dropped, hence the question and request starters; they stay as a cheap safety net. The correction memory still wins over these rules.",
   "keyword_rules": [
     {"starts": ["can you", "could you", "would you", "will you", "please tell", "tell me", "kun je", "kan je", "kunt u", "wil je", "zou je", "vertel"], "intent": "request"},
     {"starts": ["what", "why", "how", "who", "where", "when", "which", "is it", "are there", "do you", "does", "wat", "waarom", "hoe", "wie", "waar", "wanneer", "welke", "is het", "zijn er", "heb je", "weet je"], "intent": "question"},
@@ -36,11 +36,11 @@
   "system2_intents": ["question", "request"],
 
   "_watch_words": "Words that should always become the topic when heard (fuzzy-matched to tolerate ASR spelling).",
-  "watch_words": ["Devoteam", "avatar", "Laya", "TensorRT"],
+  "watch_words": ["Devoteam", "avatar", "JevK5", "TensorRT"],
 
   "memory_similarity": 0.9,
-  "_min_emotion_confidence": "Below this Laya confidence the emotion becomes 'neutral' (zero-shot emotions were often wrong).",
-  "min_emotion_confidence": 0.6,
+  "_min_emotion_confidence": "Below this decider probability the emotion becomes 'neutral'; JevK5's few emotion mistakes had probabilities below 0.5.",
+  "min_emotion_confidence": 0.5,
 
   "_reactions": "English phrases per intent; 'intent+emotion' keys win when both match. {topic} is replaced by the topic: when there is a topic, phrases with {topic} are preferred; without one they are skipped. One phrase is picked in rotation.",
   "reactions": {

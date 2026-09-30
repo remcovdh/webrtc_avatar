@@ -56,7 +56,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2v-system2"
+SERVER_BUILD = "neural-avatar-v2w-jevk5-review"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",

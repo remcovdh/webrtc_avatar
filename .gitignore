@@ -44,6 +44,7 @@ results/claude-review-images/
 results/motion-dumps/
 results/listener-test/
 results/conversations/
+results/review/
 results/system1/
 results/*.wav
 

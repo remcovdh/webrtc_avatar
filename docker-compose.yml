@@ -98,12 +98,13 @@ services:
       TURN_SILENCE_MS: "${TURN_SILENCE_MS:-700}"
       TURN_CONNECTIVE_MS: "${TURN_CONNECTIVE_MS:-1200}"
       LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
-      # M3: System 1 (Laya on the CPU, classes and reactions in
-      # config/system1.json, corrections in results/system1/). "echo" = M2.
+      # System 1: JevK5 v0.3 4B decisions on the GPU (replaced Laya), classes
+      # and reactions in config/system1.json, corrections in results/system1/.
+      # "echo" = the M2 echo responder.
       CONDUCTOR_RESPONDER: "${CONDUCTOR_RESPONDER:-system1}"
       SYSTEM1_CONFIG: /workspace/config/system1.json
       SYSTEM1_MEMORY: /workspace/results/system1/corrections.jsonl
-      SYSTEM1_DEVICE: "${SYSTEM1_DEVICE:-cpu}"
+      SYSTEM1_MODEL: "${SYSTEM1_MODEL:-alibiserikbay/JevK5-GGUF::jevk5-4b-v0.3-Q4_K_M.gguf}"
       # M4: System 2 answers questions from ./knowledge (Markdown, re-indexed
       # on change) with a small 4-bit LLM ("<hf repo>::<gguf file>").
       SYSTEM2_ENABLED: "${SYSTEM2_ENABLED:-true}"
@@ -272,6 +273,7 @@ services:
       - ./results:/workspace/results
       - ./models/trt-cache:/workspace/trt-cache
       - ./models/certs:/workspace/certs
+      - ./tools:/workspace/tools:ro
       - avatar-run:/run/avatar
     depends_on:
       model-init:

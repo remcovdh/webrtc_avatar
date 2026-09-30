@@ -4,9 +4,12 @@
 must answer, and the topic. Each field comes from the first source that knows:
 
 1. the correction memory: a sentence very similar to one the user corrected
-   in the page (cosine similarity of Laya's own embeddings);
+   in the page (cosine similarity of multilingual-e5-small embeddings);
 2. keyword rules on the ASR text (config);
-3. Laya's zero-shot typed decisions (`laya-multilingual`, on the CPU).
+3. a `Decider`: typed zero-shot decisions. `JevK5Decider` runs JevK5 v0.3 4B
+   (Qwen3.5-4B + LoRA, option-logit readout) in-process with llama.cpp. It
+   replaced Laya, which scored intent 11/16 and emotion 4-9/16 on our test set
+   against JevK5's 15/18 and 17/18.
 
 Classes, criteria, keyword rules and reaction phrases live in
 `config/system1.json` and are re-read when the file changes. Everything that
@@ -31,7 +34,12 @@ LOG = logging.getLogger("system1")
 
 CONFIG_PATH = Path(os.getenv("SYSTEM1_CONFIG", "/workspace/config/system1.json"))
 MEMORY_PATH = Path(os.getenv("SYSTEM1_MEMORY", "/workspace/results/system1/corrections.jsonl"))
-LAYA_DEVICE = os.getenv("SYSTEM1_DEVICE", "cpu")
+# "<huggingface repo>::<gguf file>" of the JevK5 decision model.
+JEVK5_MODEL = os.getenv(
+    "SYSTEM1_MODEL", "alibiserikbay/JevK5-GGUF::jevk5-4b-v0.3-Q4_K_M.gguf"
+)
+# Softmax temperature of the option-logit readout (JevK5 v0.3's jevk5_config.json).
+JEVK5_TEMPERATURE = float(os.getenv("SYSTEM1_TEMPERATURE", "1.22"))
 FIELDS = ("intent", "emotion")
 
 
@@ -45,7 +53,7 @@ class Decision:
     topic: str | None = None
     keywords: list[str] = field(default_factory=list)
     confidence: dict[str, float] = field(default_factory=dict)
-    sources: dict[str, str] = field(default_factory=dict)  # field -> memory/keyword/laya
+    sources: dict[str, str] = field(default_factory=dict)  # field -> memory/keyword/jevk5
     probabilities: dict[str, dict[str, float]] = field(default_factory=dict)
     latency_ms: float = 0.0
 
@@ -227,35 +235,104 @@ class CorrectionMemory:
 
 
 # ---------------------------------------------------------------------------
-# Laya-backed System 1
+# Deciders: typed zero-shot decisions
 # ---------------------------------------------------------------------------
 
 
-class LayaSystem1:
+class Decider(Protocol):
+    def predict(self, text: str, questions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """{"answers": {name: {"choice", "probabilities", "answer_confidence"}}}
+        for `choice` questions with {"instructions", "criteria": {key: text}}."""
+        ...
+
+
+class JevK5Decider:
+    """JevK5 in-process: one forward pass per question; the answer is the
+    softmax over the option letters' next-token logits (SemIf's readout)."""
+
+    def __init__(self, model: str = JEVK5_MODEL, llm: Any = None) -> None:
+        import threading
+
+        from jevk5.prompt import LETTERS, decision_options, prompt_text
+
+        self._letters, self._options, self._prompt = LETTERS, decision_options, prompt_text
+        if llm is None:
+            # PyTorch must load its CUDA libraries before llama.cpp does; the
+            # other order fails later with "libtorch_cuda.so: undefined symbol:
+            # ncclCommWindowRegister" when the embeddings import torch.
+            import torch  # noqa: F401
+            from huggingface_hub import hf_hub_download
+            from llama_cpp import Llama
+
+            repo, filename = model.split("::")
+            started = time.perf_counter()
+            # logits_all keeps the last position's logits readable; a small
+            # context keeps that buffer small (prompts are a few hundred tokens).
+            llm = Llama(
+                model_path=hf_hub_download(repo, filename),
+                n_gpu_layers=-1, n_ctx=1024, logits_all=True, verbose=False,
+            )
+            LOG.info("JevK5 %s loaded in %.1fs", filename, time.perf_counter() - started)
+        self.llm = llm
+        self._letter_ids = [
+            llm.tokenize(letter.encode(), add_bos=False, special=False)[0] for letter in LETTERS
+        ]
+        self._lock = threading.Lock()  # one llama context, shared by sessions
+
+    def _probabilities(self, text: str, question: dict[str, Any]) -> dict[str, float]:
+        options = self._options(question)
+        prompt = self._prompt(text, question["instructions"], [label for _, label in options])
+        tokens = self.llm.tokenize(prompt.encode(), add_bos=False, special=True)
+        with self._lock:
+            self.llm.reset()
+            self.llm.eval(tokens)
+            logits = self.llm.scores[self.llm.n_tokens - 1]
+            z = [float(logits[self._letter_ids[i]]) for i in range(len(options))]
+        top = max(z)
+        weights = [float(np.exp((v - top) / JEVK5_TEMPERATURE)) for v in z]
+        total = sum(weights)
+        return {key: w / total for (key, _), w in zip(options, weights)}
+
+    def predict(self, text: str, questions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        answers = {}
+        for name, question in questions.items():
+            probabilities = self._probabilities(text, question)
+            choice = max(probabilities, key=probabilities.get)
+            answers[name] = {
+                "choice": choice,
+                "probabilities": {k: round(v, 4) for k, v in probabilities.items()},
+                "answer_confidence": probabilities[choice],
+            }
+        return {"answers": answers}
+
+
+# ---------------------------------------------------------------------------
+# System 1: correction memory > keyword rules > decider
+# ---------------------------------------------------------------------------
+
+
+class TypedSystem1:
     def __init__(
         self,
         config_path: Path = CONFIG_PATH,
         memory_path: Path = MEMORY_PATH,
-        agent: Any = None,
+        agent: Decider | None = None,
         embed: Callable[[Sequence[str]], np.ndarray] | None = None,
         topics: TopicExtractor | None = None,
     ) -> None:
         self.config = Config(config_path)
-        if agent is None:
-            import laya
+        self.agent = agent or JevK5Decider()
+        if embed is None:
+            from knowledge import load_embedder
 
-            started = time.perf_counter()
-            agent = laya.load("convaiinnovations/laya", subfolder="multilingual", device=LAYA_DEVICE)
-            LOG.info("Laya multilingual loaded on %s in %.1fs", LAYA_DEVICE, time.perf_counter() - started)
-            if embed is None:
-                embed = laya.embed_fn_from_agent(agent)
-        self.agent = agent
-        self.memory = CorrectionMemory(memory_path, embed or (lambda texts: np.ones((len(texts), 1))))
+            e5 = load_embedder()
+            embed = lambda texts: e5(texts, True)  # noqa: E731 (sentence vs sentence)
+        self.memory = CorrectionMemory(memory_path, embed)
         self.topics = topics or TopicExtractor()
         LOG.info("Correction memory: %d sentences", len(self.memory))
 
     def warm_up(self) -> None:
-        """Load spaCy and run Laya once per language before the first turn."""
+        """Load spaCy and run the decider once per language before the first turn."""
         started = time.perf_counter()
         for text, language in (("Hoe gaat het?", "nl-NL"), ("How are you?", "en-US")):
             self.decide(text, language)
@@ -276,7 +353,7 @@ class LayaSystem1:
         answers = self.agent.predict(text, questions)["answers"]
         values = {name: answers[name]["choice"] for name in FIELDS}
         confidence = {name: round(float(answers[name].get("answer_confidence", 0.0)), 3) for name in FIELDS}
-        sources = {name: "laya" for name in FIELDS}
+        sources = {name: "jevk5" for name in FIELDS}
         # Low-confidence zero-shot emotions are more often wrong than right.
         if confidence["emotion"] < cfg.get("min_emotion_confidence", 0.0):
             values["emotion"], sources["emotion"] = "neutral", "default"

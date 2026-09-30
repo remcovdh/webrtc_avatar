@@ -1,4 +1,4 @@
-"""Build-time tests for System 1 (a fake Laya agent; real spaCy models)."""
+"""Build-time tests for System 1 (a fake decider; real spaCy models)."""
 
 import json
 import os
@@ -12,7 +12,7 @@ import numpy as np
 
 from system1 import (
     Config,
-    LayaSystem1,
+    TypedSystem1,
     Reactions,
     TopicExtractor,
     keyword_fields,
@@ -25,7 +25,7 @@ if not CONFIG.exists():
 
 
 class FakeAgent:
-    """Answers like Laya: a fixed intent/emotion with the given confidences."""
+    """Answers like a Decider: a fixed intent/emotion with the given confidences."""
 
     def __init__(self, intent="remark", emotion="joyful", emotion_confidence=0.9):
         self.intent, self.emotion, self.emotion_confidence = intent, emotion, emotion_confidence
@@ -55,21 +55,21 @@ class System1Tests(unittest.TestCase):
         shutil.copy(CONFIG, self.config)
         self.memory = self.folder / "corrections.jsonl"
 
-    def make(self, agent=None) -> LayaSystem1:
-        return LayaSystem1(self.config, self.memory, agent or FakeAgent(), bag_of_words, NoTopics())
+    def make(self, agent=None) -> TypedSystem1:
+        return TypedSystem1(self.config, self.memory, agent or FakeAgent(), bag_of_words, NoTopics())
 
-    def test_laya_answers_when_nothing_else_knows(self) -> None:
-        # Not a question by its words, so Laya decides.
+    def test_the_decider_answers_when_nothing_else_knows(self) -> None:
+        # Not a question by its words, so the decider decides.
         d = self.make(FakeAgent("question", "neutral")).decide("Ik vraag me af hoe laat het is", "nl-NL")
         self.assertEqual((d.intent, d.emotion, d.language), ("question", "neutral", "nl"))
         self.assertTrue(d.needs_system2)
-        self.assertEqual(d.sources, {"intent": "laya", "emotion": "laya"})
+        self.assertEqual(d.sources, {"intent": "jevk5", "emotion": "jevk5"})
 
     def test_low_confidence_emotion_becomes_neutral(self) -> None:
         d = self.make(FakeAgent("remark", "surprised", 0.4)).decide("I see", "en-US")
         self.assertEqual((d.emotion, d.sources["emotion"]), ("neutral", "default"))
 
-    def test_keywords_beat_laya(self) -> None:
+    def test_keywords_beat_the_decider(self) -> None:
         d = self.make(FakeAgent("greeting")).decide("Wacht even, stop maar.", "nl-NL")
         self.assertEqual((d.intent, d.sources["intent"]), ("stop", "keyword"))
         self.assertFalse(d.needs_system2)
@@ -81,7 +81,7 @@ class System1Tests(unittest.TestCase):
         self.assertEqual(similar.intent, "request")
         self.assertTrue(similar.sources["intent"].startswith("memory"))
         other = system1.decide("Your name sounds nice", "en-US")
-        self.assertEqual((other.intent, other.sources["intent"]), ("greeting", "laya"))
+        self.assertEqual((other.intent, other.sources["intent"]), ("greeting", "jevk5"))
 
     def test_corrections_survive_a_restart_and_invalid_classes_are_ignored(self) -> None:
         system1 = self.make()
@@ -100,6 +100,37 @@ class System1Tests(unittest.TestCase):
         self.config.write_text(json.dumps(data))
         os.utime(self.config, (time.time() + 5, time.time() + 5))
         self.assertIn("joke", system1.options()["intent"])
+
+
+class JevK5DeciderTests(unittest.TestCase):
+    def test_option_letter_logits_become_calibrated_probabilities(self) -> None:
+        from system1 import JEVK5_TEMPERATURE, JevK5Decider
+
+        class FakeLlama:
+            """Token id = letter index; the letter logits favour option B."""
+            n_tokens = 0
+
+            def tokenize(self, text, add_bos, special):
+                return [ord(text.decode()[0]) - ord("A")] if len(text) == 1 else [0] * 5
+
+            def reset(self):
+                self.n_tokens = 0
+
+            def eval(self, tokens):
+                self.n_tokens = len(tokens)
+                logits = np.zeros(32)
+                logits[:3] = [1.0, 3.0, 1.0]
+                self.scores = np.tile(logits, (self.n_tokens, 1))
+
+        decider = JevK5Decider(llm=FakeLlama())
+        answers = decider.predict("Stop talking", {"intent": {
+            "type": "choice", "instructions": "What is the speaker doing?",
+            "criteria": {"question": "asks", "stop": "tells to stop", "greeting": "says hello"},
+        }})["answers"]["intent"]
+        self.assertEqual(answers["choice"], "stop")
+        expected = np.exp(2 / JEVK5_TEMPERATURE) / (np.exp(2 / JEVK5_TEMPERATURE) + 2)
+        self.assertAlmostEqual(answers["answer_confidence"], expected, places=4)
+        self.assertAlmostEqual(sum(answers["probabilities"].values()), 1.0, places=3)
 
 
 class HelperTests(unittest.TestCase):

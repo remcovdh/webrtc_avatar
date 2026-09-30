@@ -31,9 +31,10 @@ speakers apart. The avatar only answers the first speaker in a session.
 
 ## How the avatar decides what to say
 
-A fast "System 1" based on the Laya model classifies each sentence: is it a
-question, a remark, a greeting, a request to stop, and which emotion does it
-carry. For quick reactions the avatar picks a fitting short phrase. Questions go
+A fast "System 1" based on the JevK5 decision model classifies each sentence:
+is it a question, a remark, a greeting, a request to stop, and which emotion
+does it carry. JevK5 replaced the Laya model, which recognised intents and
+especially emotions far less reliably. For quick reactions the avatar picks a fitting short phrase. Questions go
 to "System 2", which looks up facts in a personal knowledge folder of Markdown
 pages and lets a small local language model turn them into a short spoken
 answer. The avatar replies in English.
@@ -41,5 +42,7 @@ answer. The avatar replies in English.
 ## How the avatar learns
 
 When the avatar misjudges a sentence, the user can correct the class in the web
-page. The correction applies immediately to similar sentences. Later a nightly
-process will review conversations and retrain System 1 on the corrections.
+page. The correction applies immediately to similar sentences. A review script
+reads the logged conversations and reports knowledge gaps, unsure decisions,
+turns that went wrong, and suggestions for better classes and new knowledge
+pages. Retraining System 1 on the corrections comes later.

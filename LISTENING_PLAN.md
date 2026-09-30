@@ -107,3 +107,27 @@ Each milestone is its own version with its own explanation and commit.
   answer is spoken as one clip (smoother than sentence-by-sentence clips); a
   filler is spoken first only when the answer takes longer than 600 ms. GPU in
   total 11.1 of 16.3 GB.
+- **System 1 switches from Laya to JevK5 (decided 2026-09-30).** JevBench
+  (benchmarkheaven.com/jev-models) scores Laya multilingual at Intelligence
+  2.4; JevK5 v0.3 4B (Qwen3.5-4B + LoRA, option-logit readout, Apache-2.0) is
+  among the strongest open 4B decision models. On our Dutch/English test set:
+  intent 15/18 and emotion 17/18 (Laya: 11/16 and 4-9/16), 168 ms for both
+  questions on the GPU, +3.4 GB GPU as a Q4_K_M GGUF in the conductor
+  (total ~14.5 of 16.3 GB). The readout needs the last position's logits
+  (`logits_all` or equivalent); without them every option came out uniform.
+  Voice emotion (emotion2vec+ / SenseVoice laughter) goes to the backlog.
+- **M5 decisions (2026-09-30):** no model training yet (corrections keep
+  working through the correction memory; JevK5 LoRA training is backlog); the
+  review uses Qwen3 4B locally; it runs manually only (no cron). The review
+  writes a report with suggestions and changes nothing by itself. Because
+  JevK5 + Qwen3 do not fit next to the running avatar on the 16 GB GPU, the
+  review script pauses the avatar and TTS while it runs.
+
+- **M5 done (v2W, 2026-09-30).** `review.py`/`review.sh` as decided. First run
+  over all 65 logged turns (27 sessions): the review model took 49 s (the whole
+  script ~1.5 min including pausing and restarting the avatar). It found real
+  problems from the user's tests, mostly from the Laya period (e.g. "I like to
+  know more about closing hours" answered with "Goodbye"). Qwen3 4B's weak
+  spots: it fills suggested knowledge pages with facts of its own (the report
+  now warns about this) and sometimes gives weak reasons; its output stays a
+  suggestion.
