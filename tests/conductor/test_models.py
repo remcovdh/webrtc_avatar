@@ -33,7 +33,8 @@ class ModelNameTests(unittest.TestCase):
                 r'os\.getenv\(\s*"[A-Z0-9_]*MODEL",\s*((?:"[^"]*"\s*)+)', source
             ):
                 defaults.append((path.name, "".join(re.findall(r'"([^"]*)"', match.group(1)))))
-        self.assertGreaterEqual(len(defaults), 6)
+        # The conductor image holds four of them; the repo also has the listener's.
+        self.assertGreaterEqual(len(defaults), 4)
         for name, default in defaults:
             with self.subTest(file=name, default=default):
                 self.assertRegex(default, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}(::[\w.-]+\.gguf)?$")

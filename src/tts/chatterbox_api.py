@@ -27,6 +27,11 @@ OUTPUT_RATE = 24_000
 EXAGGERATION = float(os.getenv("CHATTERBOX_EXAGGERATION", "0.5"))
 CFG_WEIGHT = float(os.getenv("CHATTERBOX_CFG_WEIGHT", "0.5"))
 MAX_REFERENCE_BYTES = 20_000_000
+# The revision of the Turbo weights this service was tested with; empty takes
+# the latest. The other variants always take the latest.
+TURBO_REVISION = os.getenv(
+    "CHATTERBOX_TURBO_REVISION", "749d1c1a46eb10492095d68fbcf55691ccf137cd"
+).strip()
 
 model = None
 model_lock = asyncio.Lock()
@@ -39,7 +44,18 @@ def _load_model():
 
         if VARIANT == "nano":
             return ChatterboxTurboTTS.from_pretrained(device=DEVICE, nano=True)
-        return ChatterboxTurboTTS.from_pretrained(device=DEVICE)
+        if not TURBO_REVISION:
+            return ChatterboxTurboTTS.from_pretrained(device=DEVICE)
+        # What from_pretrained does, at a fixed revision.
+        from chatterbox.tts_turbo import REPO_ID
+        from huggingface_hub import snapshot_download
+
+        local_path = snapshot_download(
+            repo_id=REPO_ID,
+            revision=TURBO_REVISION,
+            allow_patterns=["*.safetensors", "*.json", "*.txt", "*.pt", "*.model"],
+        )
+        return ChatterboxTurboTTS.from_local(local_path, DEVICE)
     if VARIANT == "original":
         from chatterbox.tts import ChatterboxTTS
 

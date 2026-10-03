@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel AS common
+# Reproducible builds: the base image is pinned by digest, source checkouts by
+# commit, and every Python package by docker/locks/<service>.txt, which pip
+# gets as a constraints file and docker/check_lock.py verifies at the end of
+# each stage. Changing a dependency on purpose: see docker/locks/README.md.
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel@sha256:39236c0ad9c66baecf01bb2e4f5562543c5b336c0c785887798775d6d6fdbf9a AS common
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -14,7 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsndfile1 libsm6 libxext6 ninja-build sox \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --upgrade pip setuptools wheel packaging ninja
+RUN python -m pip install "pip==26.2.1" "setuptools==84.0.0" "wheel==0.48.0" \
+      "packaging==26.3" "ninja==1.13.2"
+COPY docker/check_lock.py /opt/locks/check_lock.py
+# Set to 0 only while changing dependencies (docker/locks/README.md).
+ARG VERIFY_LOCK=1
 
 
 # Chatterbox is isolated from the avatar dependency graph. The
@@ -24,14 +32,17 @@ RUN python -m pip install --upgrade pip setuptools wheel packaging ninja
 FROM common AS chatterbox
 
 ARG CHATTERBOX_VERSION=0.1.7
+ARG VERIFY_LOCK
 WORKDIR /workspace
-RUN python -m pip install "numpy==1.26.4" \
+COPY docker/locks/tts.txt /opt/locks/tts.txt
+RUN python -m pip install -c /opt/locks/tts.txt "numpy==1.26.4" \
       "librosa==0.11.0" s3tokenizer "transformers==5.2.0" \
       "diffusers==0.29.0" "safetensors==0.5.3" "conformer==0.3.2" \
-      "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master" \
+      "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@ff1c8ac55a976971245cdd53c18d6131ca00d993" \
       spacy-pkuseg "pykakasi==2.3.0" pyloudnorm omegaconf \
       fastapi uvicorn python-multipart \
     && python -m pip install --no-deps "chatterbox-tts==${CHATTERBOX_VERSION}" \
+    && if [ "${VERIFY_LOCK}" = "1" ]; then python /opt/locks/check_lock.py /opt/locks/tts.txt; fi \
     && python -c "import torch, torchaudio; from chatterbox.tts_turbo import ChatterboxTurboTTS; assert torch.__version__.startswith('2.9.1'); print('Chatterbox import smoke test passed')"
 
 # Every image keeps the project code under /workspace/app in the repo's own
@@ -52,10 +63,13 @@ CMD ["chatterbox"]
 FROM common AS listener
 
 ARG TRANSFORMERS_COMMIT=27166ea03f12c940f23176a904ab1d2ff1a3dcbb
+ARG VERIFY_LOCK
 WORKDIR /workspace
-RUN python -m pip install \
+COPY docker/locks/listener.txt /opt/locks/listener.txt
+RUN python -m pip install -c /opt/locks/listener.txt \
       "transformers @ git+https://github.com/huggingface/transformers@${TRANSFORMERS_COMMIT}" \
-      "silero-vad>=6,<7" librosa soundfile
+      "silero-vad>=6,<7" librosa soundfile \
+    && if [ "${VERIFY_LOCK}" = "1" ]; then python /opt/locks/check_lock.py /opt/locks/listener.txt; fi
 ENV PYTHONPATH=/workspace/app/src
 COPY src/shared /workspace/app/src/shared
 COPY src/listener /workspace/app/src/listener
@@ -73,15 +87,21 @@ WORKDIR /workspace
 # System 1: classical CPU topic extraction with small spaCy models. The JevK5
 # decision model itself runs on llama.cpp (installed below); jevk5 only
 # provides its prompt format and option letters.
-RUN python -m pip install "spacy==3.8.16" "yake==0.7.3" "rapidfuzz==3.14.6" \
+ARG VERIFY_LOCK
+COPY docker/locks/conductor.txt /opt/locks/conductor.txt
+RUN python -m pip install -c /opt/locks/conductor.txt "spacy==3.8.16" "yake==0.7.3" "rapidfuzz==3.14.6" \
       "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
       "nl_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl"
 # System 2 (M4): llama.cpp in-process for a small 4-bit LLM, compiled for the
 # RTX 50-series only (sm_120) to keep the build short; sentence-transformers
 # for CPU retrieval embeddings over the knowledge folder.
 RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120" \
-      python -m pip install "llama-cpp-python==0.3.35" "sentence-transformers==6.1.0"
-RUN python -m pip install --no-deps "jevk5 @ git+https://github.com/allebee/jevk5@v0.3.0"
+      python -m pip install -c /opt/locks/conductor.txt \
+      "llama-cpp-python==0.3.35" "sentence-transformers==6.1.0"
+# jevk5 v0.3.0, by commit: a tag can be moved.
+RUN python -m pip install --no-deps \
+      "jevk5 @ git+https://github.com/allebee/jevk5@6c6522fe5462a05fdb82bceeb0e8c624c11f1517" \
+    && if [ "${VERIFY_LOCK}" = "1" ]; then python /opt/locks/check_lock.py /opt/locks/conductor.txt; fi
 ENV PYTHONPATH=/workspace/app/src
 COPY src/shared /workspace/app/src/shared
 COPY src/conductor /workspace/app/src/conductor
@@ -96,17 +116,26 @@ CMD ["python", "-m", "conductor.app"]
 
 FROM common AS avatar
 
-ARG FASTER_LIVE_PORTRAIT_REF=master
+# The commit this code was written against (master of 2025-06-29).
+ARG FASTER_LIVE_PORTRAIT_REF=8aad3602177547aaa5e4beec0c3ef5b7944e7a1f
+ARG VERIFY_LOCK
 WORKDIR /workspace
+# MediaPipe (the face detector, see src/avatar/face_model.py) needs EGL/GLES
+# libraries present even when it runs on the CPU.
+RUN apt-get update && apt-get install -y --no-install-recommends libegl1 libgles2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/locks/avatar.txt /opt/locks/avatar.txt
 RUN mkdir -p /workspace/FasterLivePortrait \
-    && curl --fail --location --retry 5 --retry-all-errors \
-      "https://github.com/warmshao/FasterLivePortrait/archive/refs/heads/${FASTER_LIVE_PORTRAIT_REF}.tar.gz" \
-      | tar -xz --strip-components=1 -C /workspace/FasterLivePortrait
+    && curl --fail --location --retry 8 --retry-all-errors --silent --show-error \
+      -o /tmp/flp.tar.gz \
+      "https://github.com/warmshao/FasterLivePortrait/archive/${FASTER_LIVE_PORTRAIT_REF}.tar.gz" \
+    && tar -xzf /tmp/flp.tar.gz --strip-components=1 -C /workspace/FasterLivePortrait \
+    && rm /tmp/flp.tar.gz
 
 WORKDIR /workspace/FasterLivePortrait
-# The v2B server calls these upstream APIs directly to avoid video files.
-# Fail the build with a clear message if the moving master branch changes the
-# contract, rather than failing on the first request at runtime.
+# The renderer calls these upstream APIs directly. Fail the build with a clear
+# message if a newer pinned commit changes the contract, rather than failing
+# on the first request at runtime.
 RUN grep -Fq 'def gen_motion_sequence(' src/pipelines/joyvasa_audio_to_motion_pipeline.py \
     && grep -Fq 'def run_with_pkl(' src/pipelines/faster_live_portrait_pipeline.py \
     && grep -Fq 'self.src_imgs[0], self.src_infos[0]' src/pipelines/gradio_live_portrait_pipeline.py \
@@ -132,13 +161,19 @@ RUN joyvasa_model="src/models/JoyVASA/dit_talking_head.py" \
     && test "$(grep -Fc 'from_pretrained(audio_encoder_path, attn_implementation="eager")' "${joyvasa_model}")" -eq 5 \
     && python -m py_compile "${joyvasa_model}"
 
-# PyCUDA is only required by the TensorRT route. This first RTX 5080 test uses
-# ONNX Runtime, so avoiding it keeps the image independent of TensorRT 8.
-RUN sed '/^pycuda$/d' requirements.txt > /tmp/flp-requirements.txt \
-    && python -m pip install -r /tmp/flp-requirements.txt
-RUN python -m pip uninstall -y opencv-python || true
+# PyCUDA is only required by FasterLivePortrait's own TensorRT 8 route, which
+# is not used. opencv-python is replaced by the headless build below; leaving
+# it here makes pip build an old release from source to fit the pinned NumPy.
+# NumPy is left out of the constraints here: MediaPipe's OpenCV build asks for
+# NumPy 2, so pip cannot resolve this step with the 1.26 that the next step
+# installs on purpose (FasterLivePortrait and InsightFace need 1.x).
+RUN sed '/^pycuda$/d; /^opencv-python$/d' requirements.txt > /tmp/flp-requirements.txt \
+    && grep -v '^numpy==' /opt/locks/avatar.txt > /tmp/flp-constraints.txt \
+    && python -m pip install -c /tmp/flp-constraints.txt -r /tmp/flp-requirements.txt
+# A dependency still pulls opencv-python in; the headless build replaces it.
+RUN python -m pip uninstall -y opencv-python
 
-RUN python -m pip install \
+RUN python -m pip install -c /opt/locks/avatar.txt \
       "numpy==1.26.4" \
       "opencv-python-headless>=4.10,<5" \
       "onnx==1.19.1" \
@@ -159,11 +194,20 @@ RUN python -m pip install \
 # The package ships engine-builder resources for every GPU generation plus
 # Windows cross-compilation copies (6.2 GB); keep only what an sm_120
 # (RTX 50-series) engine build needs (~1.1 GB).
-RUN python -m pip install "tensorrt-cu12-libs==10.16.1.11" \
+# The wheel is fetched from NVIDIA's index by its checksum and unpacked
+# directly, leaving the unneeded resources out: installing it with pip needs
+# more than 10 GB of free disk for a moment, this needs about 5.5 GB.
+ARG TENSORRT_WHEEL=tensorrt_cu12_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl
+ARG TENSORRT_SHA256=8e45036efeb964d323231544442a73619201136ccc84392560254cc8f0d516e4
+RUN curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+      -o "/tmp/${TENSORRT_WHEEL}" "https://pypi.nvidia.com/tensorrt-cu12-libs/${TENSORRT_WHEEL}" \
+    && echo "${TENSORRT_SHA256}  /tmp/${TENSORRT_WHEEL}" | sha256sum --check --status \
+    && python -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); keep = [n for n in z.namelist() if 'libnvinfer_builder_resource_' not in n or 'libnvinfer_builder_resource_sm120.so' in n]; z.extractall(sys.argv[2], keep); print(len(keep), 'of', len(z.namelist()), 'files unpacked')" \
+         "/tmp/${TENSORRT_WHEEL}" /opt/conda/lib/python3.11/site-packages \
+    && rm "/tmp/${TENSORRT_WHEEL}" \
     && cd /opt/conda/lib/python3.11/site-packages/tensorrt_libs \
-    && find . -name 'libnvinfer_builder_resource_*' \
-         ! -name 'libnvinfer_builder_resource_sm120.so.*' -delete \
-    && test -f libnvinfer.so.10 && ls libnvinfer_builder_resource_sm120.so.*
+    && test -f libnvinfer.so.10 && ls libnvinfer_builder_resource_sm120.so.* \
+    && if [ "${VERIFY_LOCK}" = "1" ]; then python /opt/locks/check_lock.py /opt/locks/avatar.txt; fi
 ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/tensorrt_libs:${LD_LIBRARY_PATH}
 
 # Torchaudio 2.9 delegates audio decoding to TorchCodec. Catch missing FFmpeg

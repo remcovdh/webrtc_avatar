@@ -117,6 +117,16 @@ class AvatarSettings:
     preset_audio_path: str = _setting(
         "/workspace/inputs/voice-preset-nohello.wav", DEPLOYMENT
     )
+    # How the face is found in the portrait at start-up: "mediapipe"
+    # (Apache-2.0) or "insightface" (weights for non-commercial research only,
+    # and not downloaded by default).
+    face_detector: str = _setting(
+        "mediapipe", DEPLOYMENT, choices=("mediapipe", "insightface")
+    )
+    face_landmarker_path: str = _setting(
+        "/workspace/FasterLivePortrait/checkpoints/mediapipe/face_landmarker.task",
+        DEPLOYMENT,
+    )
     flp_config_path: str = _setting(
         "/workspace/FasterLivePortrait/configs/onnx_infer.yaml", DEPLOYMENT
     )

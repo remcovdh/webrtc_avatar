@@ -1,3 +1,33 @@
+# neural-avatar-v3a-reproducible
+
+## v3A smooth phrase changes, reproducible builds, licence clean-up
+
+- **No more gap between phrases or skipped frames.** Synthesizing the next
+  phrase's speech on the same GPU dropped rendering below real time, so the
+  video fell behind the voice (200-430 ms of frames skipped) and a 220 ms
+  silence followed the first phrase. Each window of frames now reports whether
+  rendering must catch up; the next window then renders every second frame and
+  shows it twice. On the three-phrase test text both are gone, for 8-12 held
+  frames out of 72 in the first phrase; time to first playback is unchanged.
+  `tools/timing_compare.py` compares timing runs per phrase.
+- **Reproducible builds.** Base image pinned by digest; FasterLivePortrait
+  (was `master`), Perth (was `master`) and jevk5 by commit; every Python
+  package by `docker/locks/<service>.txt`, used as pip constraints and verified
+  by `docker/check_lock.py` at the end of each stage; TensorRT by wheel
+  checksum; every model by Hugging Face revision (`repo@revision`) or
+  checksum. A rebuild from scratch reproduced all four lock files exactly.
+- **System 2 runs on IBM Granite 4.0 1B** (Apache-2.0) instead of Llama 3.2 3B
+  (Llama Community License): median about 110 ms instead of 260 ms and 1.5 GB
+  of GPU memory instead of 2.9 GB, with answers in English that stay with the
+  notes. The prompt now ends with a short reminder of the rules.
+- **The InsightFace weights are no longer used** (non-commercial research
+  only). The face in the portrait is found with MediaPipe (Apache-2.0); its
+  landmarks are laid out so FasterLivePortrait crops the same region (within
+  2% in scale on five test portraits). `AVATAR_FACE_DETECTOR=insightface`
+  switches back.
+- `THIRD_PARTY_NOTICES.md` lists every upstream project and model with its
+  licence.
+
 # neural-avatar-v2z-server-split
 
 ## v2Z `server.py` split into modules

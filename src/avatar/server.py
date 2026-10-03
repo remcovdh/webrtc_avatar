@@ -42,7 +42,7 @@ from avatar.tts_client import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2z-server-split"
+SERVER_BUILD = "neural-avatar-v3a-reproducible"
 ROOT = Path(__file__).resolve().parent
 
 # The one loaded configuration (defaults, profile, overrides; see config.py).
@@ -195,6 +195,7 @@ async def health() -> JSONResponse:
         "idle_frame_index": runtime.idle.index,
         # Rendering
         "warping_backend": runtime.renderer.warping_backend,
+        "face_detector": SETTINGS.face_detector,
         "render_fps_estimate": round(runtime.renderer.fps_estimate, 3),
         # Listening
         "listener_enabled": bool(SETTINGS.listener_socket.strip()),

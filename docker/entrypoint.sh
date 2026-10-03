@@ -10,7 +10,10 @@ download_models() {
 
   if [[ ! -f "${flp_checkpoints}/.download-complete" ]]; then
     echo "[models] Downloading FasterLivePortrait checkpoints"
-    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='warmshao/FasterLivePortrait', local_dir='${flp_checkpoints}')"
+    # Pinned to the revision this code was tested with. The two InsightFace
+    # models in that repository are skipped: their weights are for
+    # non-commercial research only and the avatar finds the face with MediaPipe.
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='warmshao/FasterLivePortrait', revision='eb937f4bec7186598df2d1f68e1ddbb488ae1de5', local_dir='${flp_checkpoints}', ignore_patterns=['*retinaface*', '*face_2dpose*'])"
     touch "${flp_checkpoints}/.download-complete"
   fi
 
@@ -23,15 +26,29 @@ download_models() {
   if [[ ! -f "${flp_checkpoints}/JoyVASA/.download-complete" ]]; then
     echo "[models] Downloading JoyVASA checkpoints"
     mkdir -p "${flp_checkpoints}/JoyVASA"
-    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='jdh-algo/JoyVASA', local_dir='${flp_checkpoints}/JoyVASA')"
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='jdh-algo/JoyVASA', revision='b8f13fe9c23679c56f21b1baafb92ed00dc087c3', local_dir='${flp_checkpoints}/JoyVASA')"
     touch "${flp_checkpoints}/JoyVASA/.download-complete"
   fi
 
   if [[ ! -f "${flp_checkpoints}/chinese-hubert-base/.download-complete" ]]; then
     echo "[models] Downloading JoyVASA audio encoder"
     mkdir -p "${flp_checkpoints}/chinese-hubert-base"
-    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='TencentGameMate/chinese-hubert-base', local_dir='${flp_checkpoints}/chinese-hubert-base')"
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='TencentGameMate/chinese-hubert-base', revision='fce0375452b1dd6c080ac3248d423d4d037bc831', local_dir='${flp_checkpoints}/chinese-hubert-base')"
     touch "${flp_checkpoints}/chinese-hubert-base/.download-complete"
+  fi
+
+  # MediaPipe Face Landmarker (Apache-2.0): finds the face in the portrait.
+  # The URL names a fixed version and the checksum guards the content.
+  local landmarker="${flp_checkpoints}/mediapipe/face_landmarker.task"
+  local landmarker_sha256="64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
+  if ! echo "${landmarker_sha256}  ${landmarker}" | sha256sum --check --status 2>/dev/null; then
+    echo "[models] Downloading the MediaPipe face landmarker"
+    mkdir -p "$(dirname "${landmarker}")"
+    curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+      -o "${landmarker}.tmp" \
+      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    echo "${landmarker_sha256}  ${landmarker}.tmp" | sha256sum --check --status
+    mv "${landmarker}.tmp" "${landmarker}"
   fi
 
 }

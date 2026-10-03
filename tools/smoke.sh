@@ -8,7 +8,15 @@ set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if [[ "${1:-}" != "--no-build" ]]; then
-  docker compose build webrtc-avatar 2>&1 | grep -E 'Ran [0-9]+ tests|^#[0-9]+ [0-9.]+ (OK|FAILED)|ERROR|Built' || true
+  log="$(mktemp)"
+  if ! docker compose build webrtc-avatar >"${log}" 2>&1; then
+    grep -E 'ERROR|FAILED|failed|Error' "${log}" | tail -15
+    echo "[smoke] the build failed; the running avatar is unchanged" >&2
+    rm -f "${log}"
+    exit 1
+  fi
+  grep -E 'Ran [0-9]+ tests|^#[0-9]+ [0-9.]+ OK|packages match|Built' "${log}" || true
+  rm -f "${log}"
   docker compose up -d webrtc-avatar >/dev/null 2>&1
 fi
 state=""

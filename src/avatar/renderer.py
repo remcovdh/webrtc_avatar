@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import onnxruntime as ort
 from omegaconf import OmegaConf
+import src.models as flp_models
 import src.pipelines.faster_live_portrait_pipeline as flp_pipeline
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 from src.pipelines.joyvasa_audio_to_motion_pipeline import (
@@ -32,6 +33,7 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 from src.utils.utils import get_rotation_matrix
 
 from avatar.config import AvatarSettings
+from avatar.face_model import MediaPipeFaceModel
 
 LOG = logging.getLogger("avatar.renderer")
 
@@ -239,6 +241,20 @@ class Renderer:
         cfg = OmegaConf.load(config_path)
         for name, value in flp_infer_params(settings).items():
             cfg.infer_params[name] = value
+        if settings.face_detector == "mediapipe":
+            if not Path(settings.face_landmarker_path).is_file():
+                raise FileNotFoundError(
+                    f"Missing {settings.face_landmarker_path}; run the model "
+                    "download (docker compose run --rm model-init)"
+                )
+            # FasterLivePortrait looks its model classes up by name in src.models.
+            flp_models.MediaPipeFaceModel = MediaPipeFaceModel
+            cfg.models.face_analysis = {
+                "name": "MediaPipeFaceModel",
+                "predict_type": "mp",
+                "model_path": settings.face_landmarker_path,
+            }
+        LOG.info("Face detector: %s", settings.face_detector)
         LOG.info(
             "Visual motion config: region=%s multiplier=%.2f normalize_lip=%s "
             "eye_retargeting=%s lip_retargeting=%s",

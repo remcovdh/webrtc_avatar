@@ -99,7 +99,11 @@ Each milestone is its own version with its own explanation and commit.
   on the same questions: Llama 3.2 3B chosen (median 260 ms, 2.6 GB, short,
   always English); Qwen3 4B richer but too long for speech (539 ms, 3.5 GB);
   Phi-4-mini answered Dutch questions in Dutch. All three said "I don't know"
-  for a related question the notes could not answer. Laya classified short
+  for a related question the notes could not answer. (Replaced on 2026-10-03
+  by IBM Granite 4.0 1B, Apache-2.0: on twelve questions and two traps it
+  answered in English and stayed with the notes at a median of about 110 ms
+  and 1.5 GB, once the prompt ends with a short reminder of the rules. Qwen3.5
+  2B was as faithful but wordier; Qwen3.5 0.8B invented facts.) Laya classified short
   questions without "?" wrongly (e.g. "Why is the avatar so fast" as
   disagreement), so keyword rules now catch question and request starters
   (EN/NL) and a trailing "?". End to end: answer spoken 1.85 s after the last

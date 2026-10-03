@@ -5,7 +5,7 @@ GPU. A portrait photo speaks with a cloned voice, in real time, in the browser;
 it hears you through the browser's microphone (Dutch and English), reacts
 quickly, and answers questions from a folder of your own Markdown notes.
 
-Current build: `neural-avatar-v2z-server-split` (see [docs/RELEASE.md](docs/RELEASE.md)).
+Current build: `neural-avatar-v3a-reproducible` (see [docs/RELEASE.md](docs/RELEASE.md)).
 
 ## How it works
 
@@ -38,7 +38,8 @@ for the listening side.
 - Disk space for the images, checkpoints and models (the test machine uses
   about 105 GB in total)
 - A clear, front-facing portrait as `inputs/avatar.jpg` and a reference
-  recording of the voice as `inputs/voice-preset-nohello.wav`
+  recording of the voice as `inputs/voice-preset-nohello.wav`; use a face and
+  a voice you have the right to use
 
 ## Quick start
 
@@ -121,12 +122,18 @@ logs with `docker compose exec conductor python -m conductor.forget --all --yes`
 - [docs/README.md](docs/README.md): index of everything else, including the
   history of earlier versions
 
-## Upstream projects
+## Reproducible builds
 
-[FasterLivePortrait](https://github.com/warmshao/FasterLivePortrait),
-[JoyVASA](https://github.com/jdh-algo/JoyVASA),
-[Chatterbox](https://github.com/resemble-ai/chatterbox),
-[aiortc](https://github.com/aiortc/aiortc),
-[llama.cpp](https://github.com/ggml-org/llama.cpp) and the speech and language
-models named in [CONFIG.md](CONFIG.md). Review each project's code and model
-licence before distributing anything publicly.
+The base image is pinned by digest, source checkouts by commit, every Python
+package by a lock file that the build verifies, and every model by revision or
+checksum. `docker/locks/README.md` explains what is pinned and how to change a
+dependency on purpose.
+
+## Licences and upstream projects
+
+This repository holds no model weights and no third-party code; the build
+installs and the first start downloads them.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every upstream project
+and model with its licence, and what to know before using the result beyond
+private experiments (TensorRT is proprietary, one GPL library is installed, the
+InsightFace weights are deliberately not used).

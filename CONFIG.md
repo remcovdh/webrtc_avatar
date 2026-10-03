@@ -102,6 +102,8 @@ Where things are. Not part of the configuration hash.
 |---|---|---|
 | `AVATAR_IMAGE_PATH` | /workspace/inputs/avatar.jpg | The portrait. |
 | `AVATAR_PRESET_AUDIO_PATH` | /workspace/inputs/voice-preset-nohello.wav | Reference recording of the cloned voice. |
+| `AVATAR_FACE_DETECTOR` | mediapipe | How the face is found in the portrait at start-up: `mediapipe` (Apache-2.0) or `insightface` (weights for non-commercial research only, not downloaded by default). |
+| `AVATAR_FACE_LANDMARKER_PATH` | /workspace/FasterLivePortrait/checkpoints/mediapipe/face_landmarker.task | The MediaPipe face model. |
 | `AVATAR_FLP_CONFIG_PATH` | /workspace/FasterLivePortrait/configs/onnx_infer.yaml | FasterLivePortrait configuration. |
 | `AVATAR_RESULTS_ROOT` | /workspace/results | Where temporary and result files go. |
 | `AVATAR_TENSORRT_CACHE` | /workspace/trt-cache | TensorRT engine cache. |
@@ -138,6 +140,7 @@ The avatar warns when one of these is set while its switch is off:
 | `CHATTERBOX_LANGUAGE` | en | profile |
 | `CHATTERBOX_EXAGGERATION` | 0.5 | profile |
 | `CHATTERBOX_CFG_WEIGHT` | 0.5 | profile |
+| `CHATTERBOX_TURBO_REVISION` | 749d1c1a… | deployment |
 | `CHATTERBOX_PORT` | 7860 | deployment |
 | `CHATTERBOX_VERSION` (build) | 0.1.7 | deployment |
 
@@ -150,8 +153,8 @@ only.
 | Variable | Default | Class |
 |---|---|---|
 | `LISTENER_SOCKET` | /run/avatar/listener.sock | deployment |
-| `LISTENER_ASR_MODEL` | nvidia/nemotron-3.5-asr-streaming-0.6b | deployment |
-| `LISTENER_DIAR_MODEL` | nvidia/Nemotron-3-Diarization | deployment |
+| `LISTENER_ASR_MODEL` | nvidia/nemotron-3.5-asr-streaming-0.6b@ea30d66d… | deployment |
+| `LISTENER_DIAR_MODEL` | nvidia/Nemotron-3-Diarization@f667ed73… | deployment |
 | `LISTENER_AUDIO_DIR` | results/conversations/audio | deployment |
 | `LISTENER_SAVE_AUDIO` | false | deployment |
 | `LISTENER_ASR_LOOKAHEAD` | 3 | profile |
@@ -170,12 +173,12 @@ only.
 | `CONVERSATION_LOG_DIR` | results/conversations | deployment |
 | `SYSTEM1_CONFIG` | config/system1.json | deployment |
 | `SYSTEM1_MEMORY` | results/system1/corrections.jsonl | deployment |
-| `SYSTEM1_MODEL` | JevK5 4B v0.3 Q4_K_M | deployment |
-| `SYSTEM2_MODEL` | Llama 3.2 3B Q4_K_M | deployment |
+| `SYSTEM1_MODEL` | JevK5 4B v0.3 Q4_K_M (alibiserikbay/JevK5-GGUF@ec67b0bf…) | deployment |
+| `SYSTEM2_MODEL` | Granite 4.0 1B Q4_K_M (ibm-granite/granite-4.0-1b-GGUF@b27c2fe3…) | deployment |
 | `KNOWLEDGE_DIR` | /workspace/knowledge | deployment |
-| `KNOWLEDGE_EMBED_MODEL` | intfloat/multilingual-e5-small | deployment |
+| `KNOWLEDGE_EMBED_MODEL` | intfloat/multilingual-e5-small@614241f6… | deployment |
 | `REVIEW_RESULTS` | /workspace/results | deployment |
-| `REVIEW_MODEL` | Qwen3 4B Q4_K_M | deployment |
+| `REVIEW_MODEL` | Qwen3 4B Q4_K_M (unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946b…) | deployment |
 | `CONDUCTOR_RESPONDER` | system1 | profile |
 | `SYSTEM2_ENABLED` | true | profile |
 | `TURN_SILENCE_MS` | 700 | profile |
@@ -195,6 +198,15 @@ the problems above are concentrated in the avatar service.
 must be smaller than the three `TURN_*_MS` values; the conductor checks this at
 start-up. These three services keep their existing names and read their
 settings in their own modules; their defaults were already consistent.
+
+## Model names and revisions
+
+Every model setting takes `<repo>@<revision>` (for GGUF models
+`<repo>@<revision>::<file>.gguf`), where the revision is a Hugging Face commit
+hash. The defaults carry the revision the code was tested with (shortened in
+the tables above; the full hashes are in the code), so a fresh installation
+downloads exactly those weights. Leave `@<revision>` out to take the latest.
+The models FasterLivePortrait needs are pinned in `docker/entrypoint.sh`.
 
 ## Not service configuration
 
@@ -227,4 +239,4 @@ that disagreed, most with a different name on the host and in the container.
 - `.env.before-facial-test`. `.env.example` no longer repeats defaults.
 
 The avatar now has 26 behaviour settings, 10 diagnosis switches and
-14 deployment settings, each with one name and one default.
+16 deployment settings, each with one name and one default.
