@@ -63,7 +63,7 @@ side-by-side close-ups.
 - We did *not* use FasterLivePortrait's own TensorRT route (TensorRT 8, PyCUDA,
   a prebuilt `grid_sample_3d` plugin), which does not support the RTX 50-series
   (Blackwell, sm_120).
-- Instead `src/avatar/server.py` loads FLP normally and then replaces the `warping_spade`
+- Instead `src/avatar/renderer.py` loads FLP normally and then replaces the `warping_spade`
   ONNX Runtime session with one that uses the **TensorRT execution provider**
   with `trt_fp16_enable` (`_enable_tensorrt_warping`). Inputs and outputs are
   identical, so FLP does not notice.
@@ -145,7 +145,7 @@ at close-ups of the mouth and eyes.
 FLP rotates the source crop so the face is perfectly upright. This portrait's
 face is slightly tilted, so the whole frame was turned, with black wedges in the
 corners where the crop left the photo. FLP never passes its own `flag_do_rot`
-setting to `crop_image`, so `src/avatar/server.py` wraps it (`_crop_source_image`):
+setting to `crop_image`, so `src/avatar/renderer.py` wraps it (`_crop_source_image`):
 
 - the crop stays upright (`AVATAR_CROP_ROTATION=false`); the face keeps its
   natural tilt;

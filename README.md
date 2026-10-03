@@ -5,7 +5,7 @@ GPU. A portrait photo speaks with a cloned voice, in real time, in the browser;
 it hears you through the browser's microphone (Dutch and English), reacts
 quickly, and answers questions from a folder of your own Markdown notes.
 
-Current build: `neural-avatar-v2y-structure` (see [docs/RELEASE.md](docs/RELEASE.md)).
+Current build: `neural-avatar-v2z-server-split` (see [docs/RELEASE.md](docs/RELEASE.md)).
 
 ## How it works
 
@@ -72,7 +72,12 @@ impossible combination, and lists every problem.
 
 ```
 src/            the code, one Python package per service
-  avatar/       server.py (WebRTC, rendering), serve.py, config.py, index.html
+  avatar/       server.py   the web app: page, /health, /offer
+                session.py  one browser connection (WebRTC, microphone, messages)
+                speech.py   one text -> phrases -> speech -> frames -> playback
+                renderer.py face frames from speech (JoyVASA + FasterLivePortrait)
+                playback.py, tracks.py  audio/video queue and WebRTC tracks
+                tts_client.py, phrases.py, metrics.py, config.py, index.html
   conductor/    app.py, system1.py, system2.py, knowledge.py, review.py, forget.py
   listener/     worker.py
   tts/          chatterbox_api.py
@@ -93,6 +98,7 @@ checkpoints/ models/ results/   downloaded models and output (not in git)
 ```bash
 tools/run_tests.sh                    # all unit tests on the working tree, no rebuild, no GPU
 tools/config_snapshot.py check        # running stack against config/reference/
+tools/smoke.sh                        # rebuild the avatar, restart it and check end to end
 scripts/review_recording.sh "text"    # record a phrase as frame sheets
 scripts/review.sh                     # review the logged conversations
 scripts/quality_benchmark.sh          # mouth and gaze quality matrix

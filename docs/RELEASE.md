@@ -1,3 +1,36 @@
+# neural-avatar-v2z-server-split
+
+## v2Z `server.py` split into modules
+
+No behaviour change. `src/avatar/server.py` was 2,172 lines with seven
+concerns; it is now 261 lines that wire these modules together:
+
+| Module | What it holds |
+|---|---|
+| `phrases.py` | splitting a text into phrases |
+| `playback.py` | `PlaybackBuffer`: per-browser audio/video queue on one clock; `IdleFrame` |
+| `tracks.py` | the WebRTC audio and video tracks, keep-alive noise |
+| `tts_client.py` | `TtsClient`: voice modes, synthesize, readiness |
+| `renderer.py` | `Renderer`: FasterLivePortrait load, TensorRT, upright crop, the frame loop; motion adjustment |
+| `metrics.py` | the per-phrase metrics event and log line, from one dictionary |
+| `speech.py` | `Speaker`: speaking one text (stride choice, windows, prefetch) and the warm-up |
+| `session.py` | `Session`: one browser connection |
+
+- State that was changed through `global` now belongs to objects (`Renderer`,
+  `Speaker`, `IdleFrame`, `Runtime`); no `global` statement is left. The
+  modules take the settings object instead of 45 module constants.
+- The 399-line `_create_clip` became `Speaker.speak` plus `_speak_phrase`; the
+  14 nested functions in `/offer` became the `Session` class.
+- Tests: the 18 assertions that matched literal lines of `server.py` are
+  replaced by behaviour tests with stand-ins for the renderer and the TTS
+  (motion reference reset per utterance, prefetch timing for each policy,
+  window order from the render thread, the idle image from the warm-up,
+  refusals and failures). The avatar suite went from 60 to 103 tests.
+- Three metric fields that were constant since the legacy renderer was removed
+  are dropped: `render_backend`, `render_decode_ms`,
+  `render_pipeline_reported_ms`.
+- `tools/smoke.sh` rebuilds and restarts the avatar and checks it end to end.
+
 # neural-avatar-v2y-structure
 
 ## v2Y repository structure

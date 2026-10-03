@@ -42,7 +42,7 @@ from avatar.tts_client import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2y-structure"
+SERVER_BUILD = "neural-avatar-v2z-server-split"
 ROOT = Path(__file__).resolve().parent
 
 # The one loaded configuration (defaults, profile, overrides; see config.py).

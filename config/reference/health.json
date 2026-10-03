@@ -41,7 +41,7 @@
   "relative_motion": true,
   "render_stride": 1,
   "render_window_frames": 8,
-  "server_build": "neural-avatar-v2y-structure",
+  "server_build": "neural-avatar-v2z-server-split",
   "speech_start_gate": true,
   "speech_start_safety": 1.15,
   "startup_warmup_complete": true,
