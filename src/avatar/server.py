@@ -51,6 +51,14 @@ from avatar.conductor_client import ConductorClient
 from avatar.phrases import split_phrases
 from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
 from avatar.tracks import AvatarAudioTrack, AvatarVideoTrack
+from avatar.tts_client import PROVIDER as TTS_PROVIDER
+from avatar.tts_client import (
+    VOICE_MODE_DESIGN,
+    VOICE_MODE_PRESET_CLONE,
+    VOICE_MODES,
+    TtsClient,
+    VoiceRequest,
+)
 from avatar.listener_client import SocketListener
 from shared.listener_protocol import SAMPLE_RATE as LISTENER_SAMPLE_RATE
 from shared.listener_protocol import TranscriptEvent
@@ -85,14 +93,8 @@ ROOT = Path(__file__).resolve().parent
 AVATAR_PATH = Path(SETTINGS.image_path)
 CONFIG_PATH = Path(SETTINGS.flp_config_path)
 RESULTS_ROOT = Path(SETTINGS.results_root)
-# Chatterbox behind chatterbox_api.py is the only TTS provider.
-TTS_PROVIDER = "chatterbox"
-TTS_URL = SETTINGS.tts_url.rstrip("/")
-TTS_HEALTH_PATH = "/health"
-# Reference recording for the cloned voice (preset-clone mode).
-TTS_PRESET_AUDIO_PATH = Path(SETTINGS.preset_audio_path)
+TTS = TtsClient(SETTINGS)
 TTS_DEFAULT_VOICE_MODE = SETTINGS.default_voice_mode
-TTS_SEED = 42
 # Guidance scale of JoyVASA's audio-to-motion diffusion.
 JOYVASA_CFG_SCALE = 2.8
 MAX_TEXT_LENGTH = 500
@@ -128,9 +130,6 @@ DEBUG_DUMP_DIR = SETTINGS.debug_dump_dir.strip()
 WARMUP_TEXT = "Hello."
 USE_NEURAL_IDLE_FRAME = SETTINGS.use_neural_idle_frame
 WARMUP_IDLE_FRAME_INDEX = SETTINGS.warmup_idle_frame_index
-# How long the warm-up waits for the TTS service, and how often it checks.
-TTS_STARTUP_WAIT_SECONDS = 300.0
-TTS_STARTUP_POLL_SECONDS = 2.0
 TTS_PREFETCH = SETTINGS.tts_prefetch
 TTS_PREFETCH_POLICY = SETTINGS.tts_prefetch_policy
 TTS_PREFETCH_MIN_BUFFER_SECONDS = SETTINGS.tts_prefetch_min_buffer_seconds
@@ -188,49 +187,12 @@ tts_startup_wait_seconds: float | None = None
 warping_backend = "cuda"
 render_fps_estimate = EXPECTED_RENDER_FPS
 
-# "design" is Chatterbox's built-in voice; "preset-clone" clones the reference
-# recording.
-VOICE_MODE_DESIGN = "design"
-VOICE_MODE_PRESET_CLONE = "preset-clone"
-VOICE_MODES = {VOICE_MODE_DESIGN, VOICE_MODE_PRESET_CLONE}
 
 
-@dataclass(frozen=True)
-class VoiceRequest:
-    mode: str
-    reference_path: Path | None = None
 
 
-def _preset_configuration() -> tuple[bool, str]:
-    if not TTS_PRESET_AUDIO_PATH.is_file():
-        return False, f"Missing {TTS_PRESET_AUDIO_PATH}"
-    if TTS_PRESET_AUDIO_PATH.stat().st_size == 0:
-        return False, f"Preset audio is empty: {TTS_PRESET_AUDIO_PATH}"
-    return True, "ready"
 
 
-def _resolve_voice_request(mode: str) -> VoiceRequest:
-    normalized = (mode or TTS_DEFAULT_VOICE_MODE).strip().lower()
-    aliases = {
-        "preset": VOICE_MODE_PRESET_CLONE,
-        "clone": VOICE_MODE_PRESET_CLONE,
-    }
-    normalized = aliases.get(normalized, normalized)
-    if normalized not in VOICE_MODES:
-        raise ValueError(
-            f"Voice mode {normalized!r} is unavailable; "
-            f"choose {', '.join(sorted(VOICE_MODES))}."
-        )
-    if normalized == VOICE_MODE_DESIGN:
-        return VoiceRequest(mode=normalized)
-
-    configured, problem = _preset_configuration()
-    if not configured:
-        raise ValueError(
-            f"Preset voice is not configured: {problem}. Add a clean WAV, "
-            "then recreate the avatar service."
-        )
-    return VoiceRequest(mode=normalized, reference_path=TTS_PRESET_AUDIO_PATH)
 
 
 # JoyVASA's official motion checkpoint stores its configuration as an
@@ -404,78 +366,6 @@ async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
         channel.send(json.dumps({"type": event_type, **payload}))
 
 
-async def _synthesize(
-    text: str,
-    voice: VoiceRequest,
-    pcm_path: Path,
-    wav_path: Path,
-) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
-    """Call the TTS service and normalize its raw 24 kHz PCM."""
-    request_started = time.perf_counter()
-    form = {
-        "text": (None, text),
-        "seed": (None, str(TTS_SEED)),
-    }
-    reference_bytes = 0
-    if voice.reference_path is not None:
-        payload = voice.reference_path.read_bytes()
-        reference_bytes = len(payload)
-        form["ref_audio"] = (
-            voice.reference_path.name,
-            payload,
-            "audio/wav",
-        )
-
-    timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
-    headers_ready = request_started
-    first_byte_at: float | None = None
-    body_complete = request_started
-    bytes_received = 0
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream(
-            "POST", f"{TTS_URL}/v1/audio/speech", files=form
-        ) as response:
-            headers_ready = time.perf_counter()
-            if response.is_error:
-                detail = (await response.aread()).decode("utf-8", errors="replace")[:300]
-                raise RuntimeError(
-                    f"{TTS_PROVIDER} TTS failed ({response.status_code}): {detail}"
-                )
-            with pcm_path.open("wb") as output:
-                async for chunk in response.aiter_bytes():
-                    if first_byte_at is None:
-                        first_byte_at = time.perf_counter()
-                    bytes_received += len(chunk)
-                    output.write(chunk)
-            body_complete = time.perf_counter()
-
-    finalize_started = time.perf_counter()
-    raw = pcm_path.read_bytes()
-    if len(raw) < 2:
-        raise RuntimeError(f"{TTS_PROVIDER} returned an empty audio stream")
-    if len(raw) % 2:
-        raw = raw[:-1]
-    pcm = np.frombuffer(raw, dtype="<i2").copy()
-    with wave.open(str(wav_path), "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(24_000)
-        wav_file.writeframes(pcm.tobytes())
-    complete = time.perf_counter()
-    first_byte_at = first_byte_at or body_complete
-    return pcm, {
-        "headers_ms": round((headers_ready - request_started) * 1000),
-        "first_byte_ms": round((first_byte_at - request_started) * 1000),
-        "download_ms": round((body_complete - first_byte_at) * 1000),
-        "finalize_ms": round((complete - finalize_started) * 1000),
-        "total_ms": round((complete - request_started) * 1000),
-        "bytes": bytes_received,
-        "voice_mode": voice.mode,
-        "reference_used": voice.reference_path is not None,
-        "reference_bytes": reference_bytes,
-        "provider": TTS_PROVIDER,
-    }
 
 
 def _ensure_joyvasa_pipeline() -> None:
@@ -886,7 +776,7 @@ async def _prepare_phrase_audio(
         ),
     )
     started = time.perf_counter()
-    pcm, detail = await _synthesize(
+    pcm, detail = await TTS.synthesize(
         phrase,
         voice,
         pcm_path,
@@ -922,7 +812,7 @@ async def _create_clip(
         return
 
     try:
-        voice = _resolve_voice_request(voice_mode)
+        voice = TTS.resolve_voice(voice_mode)
     except ValueError as exc:
         await _send_event(channel, "error", message=str(exc))
         return
@@ -1303,41 +1193,6 @@ async def _create_clip(
             await asyncio.gather(tts_task, return_exceptions=True)
 
 
-async def _wait_for_tts() -> float:
-    """Wait for the TTS service before startup warm-up."""
-    started = time.perf_counter()
-    deadline = started + TTS_STARTUP_WAIT_SECONDS
-    last_problem = "no response"
-    announced = False
-
-    while True:
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"{TTS_URL}{TTS_HEALTH_PATH}")
-            if response.status_code < 500:
-                waited = time.perf_counter() - started
-                if announced:
-                    LOG.info("%s became ready after %.3fs", TTS_PROVIDER, waited)
-                return waited
-            last_problem = f"HTTP {response.status_code}"
-        except httpx.HTTPError as exc:
-            last_problem = f"{type(exc).__name__}: {exc}"
-
-        now = time.perf_counter()
-        if now >= deadline:
-            raise TimeoutError(
-                f"{TTS_PROVIDER} was not ready at {TTS_URL} after "
-                f"{TTS_STARTUP_WAIT_SECONDS:.1f}s ({last_problem})"
-            )
-        if not announced:
-            LOG.info(
-                "Waiting up to %.1fs for %s at %s before startup warm-up",
-                TTS_STARTUP_WAIT_SECONDS,
-                TTS_PROVIDER,
-                TTS_URL,
-            )
-            announced = True
-        await asyncio.sleep(min(TTS_STARTUP_POLL_SECONDS, deadline - now))
 
 
 async def _warmup_pipeline() -> None:
@@ -1350,21 +1205,21 @@ async def _warmup_pipeline() -> None:
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     LOG.info("Startup warm-up begins with %r", WARMUP_TEXT)
     try:
-        tts_startup_wait_seconds = await _wait_for_tts()
+        tts_startup_wait_seconds = await TTS.wait_until_ready()
         with tempfile.TemporaryDirectory(prefix="warmup-", dir=RESULTS_ROOT) as tmp:
             warmup_dir = Path(tmp)
             pcm_path = warmup_dir / "warmup.pcm"
             wav_path = warmup_dir / "warmup.wav"
             try:
-                warmup_voice = _resolve_voice_request(TTS_DEFAULT_VOICE_MODE)
+                warmup_voice = TTS.resolve_voice(TTS_DEFAULT_VOICE_MODE)
             except ValueError as exc:
                 LOG.warning(
                     "Default voice mode is unavailable during warm-up (%s); "
                     "warming the built-in voice instead",
                     exc,
                 )
-                warmup_voice = _resolve_voice_request(VOICE_MODE_DESIGN)
-            pcm, tts_detail = await _synthesize(
+                warmup_voice = TTS.resolve_voice(VOICE_MODE_DESIGN)
+            pcm, tts_detail = await TTS.synthesize(
                 WARMUP_TEXT,
                 warmup_voice,
                 pcm_path,
@@ -1461,16 +1316,10 @@ async def index() -> FileResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    tts_ready = False
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(f"{TTS_URL}{TTS_HEALTH_PATH}")
-            tts_ready = response.status_code < 500
-    except httpx.HTTPError:
-        pass
+    tts_ready = await TTS.is_ready()
 
     providers = ort.get_available_providers()
-    preset_configured, preset_problem = _preset_configuration()
+    preset_configured, preset_problem = TTS.preset_configuration()
     body = {
         "server_build": SERVER_BUILD,
         **CONFIG.summary(),
@@ -1478,7 +1327,7 @@ async def health() -> JSONResponse:
         "avatar_ready": startup_error is None,
         "tts_ready": tts_ready,
         "tts_provider": TTS_PROVIDER,
-        "tts_url": TTS_URL,
+        "tts_url": TTS.url,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
@@ -1546,7 +1395,7 @@ async def health() -> JSONResponse:
 @app.get("/client-config")
 async def client_config() -> JSONResponse:
     ice_servers = json.loads(SETTINGS.ice_servers_json)
-    preset_configured, preset_problem = _preset_configuration()
+    preset_configured, preset_problem = TTS.preset_configuration()
     default_mode = TTS_DEFAULT_VOICE_MODE
     if default_mode not in VOICE_MODES:
         default_mode = VOICE_MODE_DESIGN
@@ -1575,7 +1424,7 @@ async def client_config() -> JSONResponse:
             "presetVoiceConfigured": preset_configured,
             "presetVoiceStatus": preset_problem,
             "presetVoiceFilename": (
-                TTS_PRESET_AUDIO_PATH.name if preset_configured else None
+                TTS.preset_audio_path.name if preset_configured else None
             ),
             "ttsProvider": TTS_PROVIDER,
         }
