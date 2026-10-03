@@ -6,3 +6,6 @@ __pycache__
 *.py[cod]
 .git
 .DS_Store
+docs
+tools
+.env

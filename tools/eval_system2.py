@@ -12,11 +12,10 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, "/workspace")
 import torch  # noqa: F401,E402  (load before llama.cpp)
 
-from knowledge import MarkdownKnowledge  # noqa: E402
-from system2 import LlamaSystem2  # noqa: E402
+from conductor.knowledge import MarkdownKnowledge  # noqa: E402
+from conductor.system2 import LlamaSystem2  # noqa: E402
 
 MODELS = sys.argv[1:] or [
     "bartowski/Llama-3.2-3B-Instruct-GGUF::Llama-3.2-3B-Instruct-Q4_K_M.gguf",
