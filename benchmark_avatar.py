@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a canonical Breeze preset and benchmark the real WebRTC avatar path."""
+"""Generate a canonical TTS preset and benchmark the real WebRTC avatar path."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ DEFAULT_DIRECTION_INSTRUCTION = (
     "Speak clearly at a natural, slightly brisk conversational pace without "
     "long pauses."
 )
-DEFAULT_MODES = "design,preset-clone,preset-direction"
+DEFAULT_MODES = "design,preset-clone"
 
 
 def _utc_stamp() -> str:
@@ -162,7 +162,7 @@ async def prepare_preset(args: argparse.Namespace) -> int:
                         "utf-8", errors="replace"
                     )[:500]
                     raise RuntimeError(
-                        f"Breeze preset generation failed ({response.status_code}): "
+                        f"TTS preset generation failed ({response.status_code}): "
                         f"{detail}"
                     )
                 sample_rate = int(response.headers.get("X-Sample-Rate", "24000"))
@@ -174,7 +174,7 @@ async def prepare_preset(args: argparse.Namespace) -> int:
                         received += len(chunk)
         raw = pcm_tmp.read_bytes()
         if len(raw) < 2:
-            raise RuntimeError("Breeze returned no preset audio")
+            raise RuntimeError("The TTS service returned no preset audio")
         if len(raw) % 2:
             raw = raw[:-1]
         with wave.open(str(wav_tmp), "wb") as output:
@@ -195,7 +195,7 @@ async def prepare_preset(args: argparse.Namespace) -> int:
     frames = received // 2
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "generator": "Breeze TTS 2 streaming API",
+        "generator": "Chatterbox built-in voice",
         "tts_url": args.tts_url,
         "text": args.text,
         "instruction": args.instruction,
@@ -535,7 +535,6 @@ def _write_csv(path: Path, runs: list[dict[str, Any]]) -> None:
         "chunks",
         "phrase",
         "voice_mode",
-        "voice_cfg_scale",
         "tts_ms",
         "tts_first_byte_ms",
         "render_ms",
@@ -818,11 +817,7 @@ async def run_benchmark(args: argparse.Namespace) -> int:
             if args.record_media
             else None
         )
-        instruction = (
-            args.direction_instruction
-            if mode == "preset-direction"
-            else args.design_instruction
-        )
+        instruction = args.design_instruction
         client = AvatarBenchmarkClient(
             base_url,
             args.timeout_seconds,
@@ -913,7 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     preset = commands.add_parser(
-        "prepare-preset", description="Generate the fixed Breeze test voice"
+        "prepare-preset", description="Generate the fixed test voice"
     )
     preset.add_argument("--tts-url", default="http://127.0.0.1:7860")
     preset.add_argument(

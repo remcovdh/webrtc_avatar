@@ -6,7 +6,7 @@ cd "${project_root}"
 
 benchmark_repeats="${BENCHMARK_REPEATS:-3}"
 benchmark_warmups="${BENCHMARK_WARMUPS:-1}"
-benchmark_modes="${BENCHMARK_MODES:-design,preset-clone,preset-direction}"
+benchmark_modes="${BENCHMARK_MODES:-design,preset-clone}"
 benchmark_render_strides="${BENCHMARK_RENDER_STRIDES:-2}"
 benchmark_adaptive_values="${BENCHMARK_ADAPTIVE_VALUES:-true}"
 benchmark_catchup_stride="${BENCHMARK_CATCHUP_STRIDE:-3}"
@@ -76,7 +76,6 @@ for render_stride in ${benchmark_render_strides}; do
       AVATAR_CATCHUP_BUFFER_SECONDS="${benchmark_catchup_buffer_seconds}" \
       AVATAR_TTS_PREFETCH="${tts_prefetch}" \
       AVATAR_PRESET_AUDIO_PATH="${preset_wav}" \
-      AVATAR_PRESET_TRANSCRIPT_FILE="${preset_transcript}" \
         docker compose up -d --force-recreate webrtc-avatar
 
       healthy=0

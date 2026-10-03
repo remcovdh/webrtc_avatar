@@ -63,11 +63,10 @@
     </section>
     <section class="panel">
       <h1>Neural Avatar Lab</h1>
-      <p class="lede">Breeze TTS 2 · JoyVASA · FasterLivePortrait · WebRTC</p>
+      <p class="lede">Chatterbox TTS · JoyVASA · FasterLivePortrait · WebRTC</p>
       <label>Speech<textarea id="textInput" maxlength="500">Hello! This is my first neural streaming avatar test.</textarea></label>
       <label>Voice mode<select id="voiceModeInput"></select></label>
       <div class="details" id="voiceModeDetails">Loading voice modes…</div>
-      <label id="instructionLabel">Voice direction<input id="instructionInput" value="A warm, clear, natural voice with a calm conversational delivery."></label>
       <div class="actions">
         <button id="sendBtn" disabled>Generate &amp; speak</button>
         <button id="audioBtn" class="secondary">Enable audio</button>
@@ -95,8 +94,8 @@
         </div>
         <div class="timing-wrap">
           <table>
-            <thead><tr><th>Phrase</th><th>Voice</th><th>CFG</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Next prefetch</th><th>Backend</th><th>Stride</th><th>Policy</th><th>Motion</th><th>First window</th><th>Windows</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Decode</th><th>Render</th><th>Media</th><th>Buffer</th><th>Audio gap</th><th>Video hold</th></tr></thead>
-            <tbody id="timingRows"><tr><td class="empty" colspan="24">Timings appear here</td></tr></tbody>
+            <thead><tr><th>Phrase</th><th>Voice</th><th>TTS</th><th>TTS wait</th><th>TTS overlap</th><th>First byte</th><th>Next prefetch</th><th>Stride</th><th>Policy</th><th>Motion</th><th>First window</th><th>Windows</th><th>Frame loop</th><th>Neural FPS</th><th>Frames</th><th>Playback FPS</th><th>FLP pipeline</th><th>Render</th><th>Media</th><th>Buffer</th><th>Audio gap</th><th>Video hold</th></tr></thead>
+            <tbody id="timingRows"><tr><td class="empty" colspan="22">Timings appear here</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -112,7 +111,6 @@
     const textInput = document.querySelector("#textInput");
     const voiceModeInput = document.querySelector("#voiceModeInput");
     const voiceModeDetails = document.querySelector("#voiceModeDetails");
-    const instructionInput = document.querySelector("#instructionInput");
     const sendBtn = document.querySelector("#sendBtn");
     const audioBtn = document.querySelector("#audioBtn");
     const timingRows = document.querySelector("#timingRows");
@@ -216,7 +214,7 @@
     function setStatus(message, tone = "") { statusBox.textContent = message; statusBox.className = tone; }
     function setReady(ready) { sendBtn.disabled = !ready; if (ready) setStatus("Ready", "good"); }
     function resetTimings() {
-      timingRows.innerHTML = '<tr><td class="empty" colspan="25">Splitting text into phrases…</td></tr>';
+      timingRows.innerHTML = '<tr><td class="empty" colspan="22">Splitting text into phrases…</td></tr>';
       timingSummary.textContent = "Waiting for first phrase";
     }
     function formatMs(value) { return `${Math.max(0, Number(value || 0))} ms`; }
@@ -227,7 +225,6 @@
       const values = [
         `${message.chunk}/${message.chunks} ${message.phrase || ""}`,
         message.voice_mode || "design",
-        Number(message.voice_cfg_scale || 1).toFixed(1),
         formatMs(message.tts_ms),
         formatMs(message.tts_wait_ms),
         formatMs(message.tts_overlap_ms),
@@ -235,7 +232,6 @@
         message.next_tts_prefetch_started
           ? `${message.tts_prefetch_policy || "adaptive"} @ ${Number(message.next_tts_prefetch_buffer_seconds || 0).toFixed(2)} s`
           : (message.tts_prefetch_policy || "off") === "off" ? "off" : "not launched",
-        message.render_backend || "unknown",
         String(Math.max(1, Number(message.render_stride || 1))),
         `${message.render_stride_reason || "fixed"} @ ${Number(message.render_buffer_before_seconds || 0).toFixed(2)} s`,
         formatMs(message.render_motion_ms),
@@ -246,7 +242,6 @@
         `${Number(message.render_frames || 0)}/${Number(message.render_motion_frames || message.render_frames || 0)}`,
         formatRate(message.render_playback_fps),
         formatMs(message.render_pipeline_ms),
-        formatMs(message.render_decode_ms),
         formatMs(message.render_ms),
         `${Number(message.media_seconds || 0).toFixed(2)} s`,
         `${Number(message.buffered_seconds || 0).toFixed(2)} s`,
@@ -264,16 +259,14 @@
     }
     function updateVoiceControls() {
       const selected = voiceModes.find(mode => mode.id === voiceModeInput.value);
-      const cloneOnly = selected?.id === "preset-clone";
-      instructionInput.disabled = cloneOnly;
       voiceModeDetails.textContent = selected
-        ? `${selected.description} CFG ${Number(selected.cfgScale || 1).toFixed(1)}${selected.available ? "" : " · preset files missing"}`
+        ? `${selected.description}${selected.available ? "" : " · preset file missing"}`
         : "Voice mode unavailable";
     }
     function configureVoiceModes(config) {
       voiceModes = Array.isArray(config.voiceModes) ? config.voiceModes : [];
       if (!voiceModes.length) {
-        voiceModes = [{ id:"design", label:"Designed voice", description:"Create a voice from the direction.", available:true, cfgScale:4 }];
+        voiceModes = [{ id:"design", label:"Chatterbox built-in voice", description:"Use Chatterbox's built-in voice.", available:true }];
       }
       voiceModeInput.innerHTML = "";
       for (const mode of voiceModes) {
@@ -283,7 +276,6 @@
         option.disabled = !mode.available;
         voiceModeInput.appendChild(option);
       }
-      instructionInput.value = config.defaultVoiceInstruction || instructionInput.value;
       voiceModeInput.value = config.defaultVoiceMode || "design";
       if (!voiceModeInput.value) voiceModeInput.value = "design";
       updateVoiceControls();
@@ -342,7 +334,7 @@
         const windows = healthBody.incremental_frame_windows
           ? `${healthBody.render_window_frames || 8}-frame windows`
           : "phrase-batch frames";
-        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · TTS ${healthBody.tts_provider || "unknown"} · ${healthBody.render_backend || "unknown renderer"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
+        runtimeDetails.textContent = `${healthBody.server_build || "unknown build"} · TTS ${healthBody.tts_provider || "unknown"} · ${windows} · ${renderPolicy} · ${prefetch} · ${preset} · ${warmup}`;
         serverLipOffsetMs = Number(healthBody.lip_sync_offset_ms || 0);
         configureListening(Boolean(healthBody.listener_enabled));
         const config = await fetch("/client-config").then(response => response.json());
@@ -471,7 +463,6 @@
       resetTimings(); sendBtn.disabled = true; setStatus("Request sent…");
       channel.send(JSON.stringify({
         text,
-        instruction:instructionInput.value.trim(),
         voice_mode:voiceModeInput.value,
       }));
     }

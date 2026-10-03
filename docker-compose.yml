@@ -17,29 +17,21 @@ services:
     volumes: *model-volumes
     restart: "no"
 
-  # One service name and port for either local provider. TTS_PROVIDER selects
-  # the matching isolated Docker target, image and entrypoint command.
+  # Chatterbox TTS behind chatterbox_api.py, in its own image because its
+  # dependencies clash with the avatar's.
   tts:
     build:
       context: .
       dockerfile: Dockerfile
-      target: "${TTS_PROVIDER:-chatterbox}"
+      target: chatterbox
       args:
-        BREEZE_INSTALL_FLASH_ATTN: "${BREEZE_INSTALL_FLASH_ATTN:-0}"
-        FLASH_ATTN_CUDA_ARCHS: "${FLASH_ATTN_CUDA_ARCHS:-120}"
         CHATTERBOX_VERSION: "${CHATTERBOX_VERSION:-0.1.7}"
-    image: "neural-avatar-tts-${TTS_PROVIDER:-chatterbox}:latest"
-    command: ["${TTS_PROVIDER:-chatterbox}"]
+    image: neural-avatar-tts-chatterbox:latest
+    command: ["chatterbox"]
     network_mode: host
     gpus: all
     shm_size: 4gb
     environment:
-      TTS_PROVIDER: "${TTS_PROVIDER:-chatterbox}"
-      # Set only through breeze-benchmark.sh unless intentionally testing a
-      # known configuration. Empty means Breeze's eager baseline.
-      # v2I default selected by the five-repeat v2H benchmark. Override with
-      # an empty value for eager or another tested combination for rollback.
-      BREEZE_FAST_ARGS: "${BREEZE_FAST_ARGS:---fast-depth-decoder --fast-codec --fast-backbone-decode}"
       CHATTERBOX_VARIANT: "${CHATTERBOX_VARIANT:-turbo}"
       CHATTERBOX_DEVICE: "${CHATTERBOX_DEVICE:-cuda}"
       CHATTERBOX_LANGUAGE: "${CHATTERBOX_LANGUAGE:-en}"
@@ -50,7 +42,7 @@ services:
       - ./models/chatterbox-cache:/root/.cache/huggingface
       - ./inputs:/workspace/inputs:ro
     healthcheck:
-      test: ["CMD-SHELL", "if [ \"$${TTS_PROVIDER}\" = chatterbox ]; then curl --fail --silent http://127.0.0.1:7860/health; else curl --fail --silent http://127.0.0.1:7860/docs; fi"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:7860/health"]
       interval: 10s
       timeout: 5s
       retries: 60
@@ -130,7 +122,6 @@ services:
     ipc: host
     shm_size: 8gb
     environment:
-      TTS_PROVIDER: "${TTS_PROVIDER:-chatterbox}"
       TTS_URL: "${TTS_URL:-http://127.0.0.1:7860}"
       AVATAR_PATH: /workspace/inputs/avatar.jpg
       FLP_CONFIG_PATH: /workspace/FasterLivePortrait/configs/onnx_infer.yaml
@@ -205,26 +196,15 @@ services:
       AVATAR_DEBUG_DUMP_DIR: "${AVATAR_DEBUG_DUMP_DIR:-}"
       AVATAR_LIP_RETARGETING: "${AVATAR_LIP_RETARGETING:-false}"
       # Voice modes exposed in the browser:
-      #   design           = reference-free voice design with CFG 4
-      #   preset-clone     = fixed reference identity with CFG 1
-      #   preset-direction = fixed identity plus this direction with CFG 4
+      #   design       = Chatterbox's built-in voice
+      #   preset-clone = the voice of the reference recording below
       TTS_DEFAULT_VOICE_MODE: "${TTS_DEFAULT_VOICE_MODE:-preset-clone}"
-      BREEZE_VOICE_INSTRUCTION: "A warm, clear, natural voice with a calm conversational delivery."
-      BREEZE_DESIGN_CFG_SCALE: "4"
-      BREEZE_PRESET_CLONE_CFG_SCALE: "1"
-      BREEZE_PRESET_DIRECTION_CFG_SCALE: "4"
-      BREEZE_PRESET_CLONE_INSTRUCTION: "Speak naturally in the reference voice."
-      # A generated Breeze sentence or an owned/licensed WAV can be the preset.
-      # Preset modes become selectable only when both the WAV and its exact
-      # transcript file exist in ./inputs.
+      # An owned/licensed WAV in ./inputs is the cloned voice.
       # The reference recording without its opening "Hello,": Chatterbox Turbo
       # continued the reference sentence ("Hello, I am your friendly virtual
       # assistant...") whenever a reply also started with "Hello".
-      BREEZE_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset-nohello.wav}"
-      BREEZE_PRESET_TRANSCRIPT_FILE: "${AVATAR_PRESET_TRANSCRIPT_FILE:-/workspace/inputs/voice-preset-nohello.txt}"
-      # Optional alternative to the .txt file; leave empty to read the file.
-      BREEZE_PRESET_TRANSCRIPT: ""
-      # v2A initializes Breeze, HuBERT, JoyVASA and the renderer before the
+      TTS_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset-nohello.wav}"
+      # v2A initializes the TTS, HuBERT, JoyVASA and the renderer before the
       # browser can submit its first request. Failure is reported but nonfatal.
       STARTUP_WARMUP: "true"
       WARMUP_TEXT: "Hello."
@@ -282,7 +262,7 @@ services:
     restart: "no"
 
   # Invoked by benchmark.sh only. It uses the avatar image for httpx and WAV
-  # tooling, writes the fixed Breeze-generated preset into ./inputs, and exits.
+  # tooling, writes the fixed generated preset into ./inputs, and exits.
   benchmark-fixture:
     profiles: ["benchmark"]
     build: *avatar-build

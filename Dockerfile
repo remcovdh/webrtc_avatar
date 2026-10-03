@@ -17,37 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m pip install --upgrade pip setuptools wheel packaging ninja
 
 
-# Breeze is a separate runtime target because it requires NumPy 2.x while the
-# FasterLivePortrait / InsightFace stack is safer on NumPy 1.26.
-FROM common AS breeze
-
-ARG BREEZE_REF=main
-ARG BREEZE_INSTALL_FLASH_ATTN=0
-ARG FLASH_ATTN_CUDA_ARCHS=120
-WORKDIR /workspace
-
-RUN mkdir -p /workspace/breeze-tts \
-    && curl --fail --location --retry 5 --retry-all-errors \
-      "https://github.com/breezeblue-ai/breeze-tts/archive/refs/heads/${BREEZE_REF}.tar.gz" \
-      | tar -xz --strip-components=1 -C /workspace/breeze-tts
-WORKDIR /workspace/breeze-tts
-# Breeze's eager runtime works without FlashAttention and PyTorch 2.9.1 with
-# CUDA 12.8 supports sm_120. Keep FlashAttention experimental below.
-RUN python -m pip install -r requirements.txt
-# Experimental on RTX 50-series/Blackwell: upstream FlashAttention 2 does not
-# currently list Blackwell as supported. Keep this opt-in.
-RUN if [ "${BREEZE_INSTALL_FLASH_ATTN}" = "1" ]; then \
-      MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS}" \
-        python -m pip install --no-build-isolation --no-deps "flash-attn==2.8.3"; \
-    fi
-
-COPY entrypoint.sh breeze_benchmark.py /workspace/
-RUN chmod +x /workspace/entrypoint.sh
-ENTRYPOINT ["/workspace/entrypoint.sh"]
-CMD ["tts"]
-
-
-# Chatterbox is isolated from the avatar and Breeze dependency graphs. The
+# Chatterbox is isolated from the avatar dependency graph. The
 # official package pins Torch 2.6, which predates the RTX 5080 stack used by
 # this project, so retain the CUDA 12.8 / Torch 2.9 runtime and install the
 # Chatterbox package without allowing pip to replace Torch or torchaudio.

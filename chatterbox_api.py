@@ -135,13 +135,9 @@ async def health():
 @app.post("/v1/audio/speech")
 async def speech(
     text: str = Form(...),
-    instruction: str = Form(""),
-    cfg_scale: str = Form("1"),
     seed: int = Form(42),
-    ref_text: str = Form(""),
     ref_audio: UploadFile | None = File(None),
 ):
-    del instruction, cfg_scale, ref_text
     if model is None:
         raise HTTPException(503, startup_error or "Chatterbox is loading")
     text = text.strip()

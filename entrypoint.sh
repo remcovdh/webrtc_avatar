@@ -4,7 +4,6 @@ set -Eeuo pipefail
 mode="${1:-serve}"
 flp_root="/workspace/FasterLivePortrait"
 flp_checkpoints="${FLP_CHECKPOINT_DIR:-${flp_root}/checkpoints}"
-breeze_model="${BREEZE_MODEL_DIR:-/workspace/models/Breeze-TTS-2}"
 
 download_models() {
   mkdir -p "${flp_checkpoints}"
@@ -64,15 +63,6 @@ ensure_https_certificate() {
   fi
 }
 
-download_breeze_model() {
-  mkdir -p "${breeze_model}"
-  if [[ ! -f "${breeze_model}/.download-complete" ]]; then
-    echo "[models] Downloading Breeze TTS 2"
-    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BreezeBlue/Breeze-TTS-2', local_dir='${breeze_model}')"
-    touch "${breeze_model}/.download-complete"
-  fi
-}
-
 case "${mode}" in
   download)
     download_models
@@ -83,21 +73,6 @@ case "${mode}" in
       ensure_https_certificate
     fi
     exec python serve.py
-    ;;
-  tts)
-    download_breeze_model
-    cd /workspace/breeze-tts
-    breeze_fast_args=()
-    if [[ -n "${BREEZE_FAST_ARGS:-}" ]]; then
-      read -r -a breeze_fast_args <<< "${BREEZE_FAST_ARGS}"
-    fi
-    echo "[breeze] Fast-path arguments: ${BREEZE_FAST_ARGS:-<eager baseline>}"
-    exec python -m breeze_infer.api "${breeze_model}" \
-      --host 0.0.0.0 --port "${BREEZE_PORT:-7860}" \
-      "${breeze_fast_args[@]}"
-    ;;
-  breeze)
-    "$0" tts
     ;;
   chatterbox)
     cd /workspace

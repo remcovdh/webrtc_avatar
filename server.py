@@ -1,4 +1,4 @@
-"""Progressive WebRTC avatar server using Breeze TTS 2 and FasterLivePortrait.
+"""Progressive WebRTC avatar server using Chatterbox TTS and FasterLivePortrait.
 
 Each request is divided into short phrases. The first completed phrase starts
 playing immediately while later phrases are synthesized and rendered.
@@ -79,52 +79,18 @@ CONFIG_PATH = Path(
     )
 )
 RESULTS_ROOT = Path(os.getenv("RESULTS_ROOT", "/workspace/results"))
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "chatterbox").strip().lower()
-if TTS_PROVIDER not in {"breeze", "chatterbox"}:
-    raise ValueError("TTS_PROVIDER must be breeze or chatterbox")
-TTS_URL = os.getenv(
-    "TTS_URL",
-    os.getenv("BREEZE_TTS_URL", "http://127.0.0.1:7860"),
-).rstrip("/")
-TTS_HEALTH_PATH = os.getenv(
-    "TTS_HEALTH_PATH",
-    "/health" if TTS_PROVIDER == "chatterbox" else "/docs",
-)
-TTS_INSTRUCTION = os.getenv(
-    "BREEZE_VOICE_INSTRUCTION",
-    "A warm, clear, natural voice with a calm conversational delivery.",
-)
-TTS_DESIGN_CFG_SCALE = float(
-    os.getenv("BREEZE_DESIGN_CFG_SCALE", os.getenv("BREEZE_CFG_SCALE", "4"))
-)
-TTS_PRESET_CLONE_CFG_SCALE = float(
-    os.getenv("BREEZE_PRESET_CLONE_CFG_SCALE", "1")
-)
-TTS_PRESET_DIRECTION_CFG_SCALE = float(
-    os.getenv("BREEZE_PRESET_DIRECTION_CFG_SCALE", "4")
-)
-TTS_PRESET_CLONE_INSTRUCTION = os.getenv(
-    "BREEZE_PRESET_CLONE_INSTRUCTION",
-    "Speak naturally in the reference voice.",
-).strip() or "Speak naturally in the reference voice."
+# Chatterbox behind chatterbox_api.py is the only TTS provider.
+TTS_PROVIDER = "chatterbox"
+TTS_URL = os.getenv("TTS_URL", "http://127.0.0.1:7860").rstrip("/")
+TTS_HEALTH_PATH = "/health"
+# Reference recording for the cloned voice (preset-clone mode).
 TTS_PRESET_AUDIO_PATH = Path(
-    os.getenv(
-        "BREEZE_PRESET_AUDIO_PATH",
-        "/workspace/inputs/voice-preset.wav",
-    )
-)
-TTS_PRESET_TRANSCRIPT = os.getenv("BREEZE_PRESET_TRANSCRIPT", "").strip()
-TTS_PRESET_TRANSCRIPT_FILE = Path(
-    os.getenv(
-        "BREEZE_PRESET_TRANSCRIPT_FILE",
-        "/workspace/inputs/voice-preset.txt",
-    )
+    os.getenv("TTS_PRESET_AUDIO_PATH", "/workspace/inputs/voice-preset.wav")
 )
 TTS_DEFAULT_VOICE_MODE = os.getenv(
-    "TTS_DEFAULT_VOICE_MODE",
-    os.getenv("BREEZE_DEFAULT_VOICE_MODE", "preset-clone"),
+    "TTS_DEFAULT_VOICE_MODE", "preset-clone"
 ).strip().lower()
-TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
+TTS_SEED = 42
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
 INCREMENTAL_FRAME_WINDOWS = _env_bool("INCREMENTAL_FRAME_WINDOWS", True)
 RENDER_WINDOW_FRAMES = max(1, int(os.getenv("RENDER_WINDOW_FRAMES", "8")))
@@ -264,105 +230,50 @@ idle_frame_index: int | None = None
 warping_backend = "cuda"
 render_fps_estimate = EXPECTED_RENDER_FPS
 
+# "design" is Chatterbox's built-in voice; "preset-clone" clones the reference
+# recording.
 VOICE_MODE_DESIGN = "design"
 VOICE_MODE_PRESET_CLONE = "preset-clone"
-VOICE_MODE_PRESET_DIRECTION = "preset-direction"
-VOICE_MODES = {
-    VOICE_MODE_DESIGN,
-    VOICE_MODE_PRESET_CLONE,
-    VOICE_MODE_PRESET_DIRECTION,
-}
-SUPPORTED_VOICE_MODES = (
-    {VOICE_MODE_DESIGN, VOICE_MODE_PRESET_CLONE}
-    if TTS_PROVIDER == "chatterbox"
-    else VOICE_MODES
-)
+VOICE_MODES = {VOICE_MODE_DESIGN, VOICE_MODE_PRESET_CLONE}
 
 
 @dataclass(frozen=True)
 class VoiceRequest:
     mode: str
-    instruction: str
-    cfg_scale: float
     reference_path: Path | None = None
-    reference_text: str = ""
 
 
-def _load_preset_transcript() -> str:
-    """Return the configured exact transcript without accepting client paths."""
-    if TTS_PRESET_TRANSCRIPT:
-        return TTS_PRESET_TRANSCRIPT
-    try:
-        return TTS_PRESET_TRANSCRIPT_FILE.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
-
-
-def _preset_configuration() -> tuple[bool, str, str]:
-    transcript = _load_preset_transcript()
+def _preset_configuration() -> tuple[bool, str]:
     if not TTS_PRESET_AUDIO_PATH.is_file():
-        return False, transcript, f"Missing {TTS_PRESET_AUDIO_PATH}"
-    if TTS_PROVIDER == "breeze" and not transcript:
-        return (
-            False,
-            transcript,
-            "Missing exact preset transcript in "
-            f"{TTS_PRESET_TRANSCRIPT_FILE} or BREEZE_PRESET_TRANSCRIPT",
-        )
+        return False, f"Missing {TTS_PRESET_AUDIO_PATH}"
     if TTS_PRESET_AUDIO_PATH.stat().st_size == 0:
-        return False, transcript, f"Preset audio is empty: {TTS_PRESET_AUDIO_PATH}"
-    return True, transcript, "ready"
+        return False, f"Preset audio is empty: {TTS_PRESET_AUDIO_PATH}"
+    return True, "ready"
 
 
-def _resolve_voice_request(mode: str, instruction: str) -> VoiceRequest:
+def _resolve_voice_request(mode: str) -> VoiceRequest:
     normalized = (mode or TTS_DEFAULT_VOICE_MODE).strip().lower()
     aliases = {
         "preset": VOICE_MODE_PRESET_CLONE,
         "clone": VOICE_MODE_PRESET_CLONE,
-        "direction": VOICE_MODE_PRESET_DIRECTION,
     }
     normalized = aliases.get(normalized, normalized)
-    if normalized not in SUPPORTED_VOICE_MODES:
+    if normalized not in VOICE_MODES:
         raise ValueError(
-            f"Voice mode {normalized!r} is unavailable for {TTS_PROVIDER}; "
-            f"choose {', '.join(sorted(SUPPORTED_VOICE_MODES))}."
+            f"Voice mode {normalized!r} is unavailable; "
+            f"choose {', '.join(sorted(VOICE_MODES))}."
         )
-
-    requested_instruction = instruction.strip() or TTS_INSTRUCTION
     if normalized == VOICE_MODE_DESIGN:
-        return VoiceRequest(
-            mode=normalized,
-            instruction=requested_instruction,
-            cfg_scale=TTS_DESIGN_CFG_SCALE,
-        )
+        return VoiceRequest(mode=normalized)
 
-    configured, transcript, problem = _preset_configuration()
+    configured, problem = _preset_configuration()
     if not configured:
         raise ValueError(
-            f"Preset voice is not configured: {problem}. Add a clean WAV "
-            + (
-                "and its exact transcript, then recreate the avatar service."
-                if TTS_PROVIDER == "breeze"
-                else "then recreate the avatar service."
-            )
+            f"Preset voice is not configured: {problem}. Add a clean WAV, "
+            "then recreate the avatar service."
         )
+    return VoiceRequest(mode=normalized, reference_path=TTS_PRESET_AUDIO_PATH)
 
-    if normalized == VOICE_MODE_PRESET_CLONE:
-        return VoiceRequest(
-            mode=normalized,
-            instruction=TTS_PRESET_CLONE_INSTRUCTION,
-            cfg_scale=TTS_PRESET_CLONE_CFG_SCALE,
-            reference_path=TTS_PRESET_AUDIO_PATH,
-            reference_text=transcript,
-        )
-
-    return VoiceRequest(
-        mode=normalized,
-        instruction=requested_instruction,
-        cfg_scale=TTS_PRESET_DIRECTION_CFG_SCALE,
-        reference_path=TTS_PRESET_AUDIO_PATH,
-        reference_text=transcript,
-    )
 
 # JoyVASA's official motion checkpoint stores its configuration as an
 # argparse.Namespace. PyTorch 2.6+ blocks that class by default when loading
@@ -904,12 +815,10 @@ async def _synthesize(
     pcm_path: Path,
     wav_path: Path,
 ) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
-    """Call the configured TTS provider and normalize its raw 24 kHz PCM."""
+    """Call the TTS service and normalize its raw 24 kHz PCM."""
     request_started = time.perf_counter()
     form = {
         "text": (None, text),
-        "instruction": (None, voice.instruction),
-        "cfg_scale": (None, str(voice.cfg_scale)),
         "seed": (None, str(TTS_SEED)),
     }
     reference_bytes = 0
@@ -921,7 +830,6 @@ async def _synthesize(
             payload,
             "audio/wav",
         )
-        form["ref_text"] = (None, voice.reference_text)
 
     timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
     headers_ready = request_started
@@ -969,7 +877,6 @@ async def _synthesize(
         "total_ms": round((complete - request_started) * 1000),
         "bytes": bytes_received,
         "voice_mode": voice.mode,
-        "cfg_scale": voice.cfg_scale,
         "reference_used": voice.reference_path is not None,
         "reference_bytes": reference_bytes,
         "provider": TTS_PROVIDER,
@@ -1402,7 +1309,6 @@ async def _prepare_phrase_audio(
 
 async def _create_clip(
     text: str,
-    instruction: str,
     voice_mode: str,
     playback: PlaybackBuffer,
     channel: Any,
@@ -1421,7 +1327,7 @@ async def _create_clip(
         return
 
     try:
-        voice = _resolve_voice_request(voice_mode, instruction)
+        voice = _resolve_voice_request(voice_mode)
     except ValueError as exc:
         await _send_event(channel, "error", message=str(exc))
         return
@@ -1441,7 +1347,6 @@ async def _create_clip(
         ),
         phrases=phrases,
         voice_mode=voice.mode,
-        cfg_scale=voice.cfg_scale,
         tts_provider=TTS_PROVIDER,
     )
 
@@ -1610,7 +1515,7 @@ async def _create_clip(
                     ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
 
                     LOG.info(
-                        "Phrase %d/%d timings: voice=%s cfg=%.2f tts=%.3fs tts_wait=%dms "
+                        "Phrase %d/%d timings: voice=%s tts=%.3fs tts_wait=%dms "
                         "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
                         "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
                         "buffer_before=%.3fs prefetch_policy=%s next_prefetch=%s "
@@ -1623,7 +1528,6 @@ async def _create_clip(
                         index,
                         len(phrases),
                         voice.mode,
-                        voice.cfg_scale,
                         tts_seconds,
                         tts_wait_ms,
                         tts_overlap_ms,
@@ -1663,7 +1567,6 @@ async def _create_clip(
                         phrase=phrase,
                         voice_mode=voice.mode,
                         tts_provider=TTS_PROVIDER,
-                        voice_cfg_scale=voice.cfg_scale,
                         voice_reference_used=voice.reference_path is not None,
                         tts_ms=round(tts_seconds * 1000),
                         tts_wait_ms=tts_wait_ms,
@@ -1806,7 +1709,7 @@ async def _create_clip(
 
 
 async def _wait_for_tts() -> float:
-    """Wait for the configured TTS provider before startup warm-up."""
+    """Wait for the TTS service before startup warm-up."""
     started = time.perf_counter()
     deadline = started + TTS_STARTUP_WAIT_SECONDS
     last_problem = "no response"
@@ -1859,20 +1762,14 @@ async def _warmup_pipeline() -> None:
             pcm_path = warmup_dir / "warmup.pcm"
             wav_path = warmup_dir / "warmup.wav"
             try:
-                warmup_voice = _resolve_voice_request(
-                    TTS_DEFAULT_VOICE_MODE,
-                    TTS_INSTRUCTION,
-                )
+                warmup_voice = _resolve_voice_request(TTS_DEFAULT_VOICE_MODE)
             except ValueError as exc:
                 LOG.warning(
                     "Default voice mode is unavailable during warm-up (%s); "
-                    "warming the designed voice instead",
+                    "warming the built-in voice instead",
                     exc,
                 )
-                warmup_voice = _resolve_voice_request(
-                    VOICE_MODE_DESIGN,
-                    TTS_INSTRUCTION,
-                )
+                warmup_voice = _resolve_voice_request(VOICE_MODE_DESIGN)
             pcm, tts_detail = await _synthesize(
                 WARMUP_TEXT,
                 warmup_voice,
@@ -1908,7 +1805,6 @@ async def _warmup_pipeline() -> None:
                 "tts_startup_wait_ms": round(tts_startup_wait_seconds * 1000),
                 "tts": tts_detail,
                 "voice_mode": warmup_voice.mode,
-                "voice_cfg_scale": warmup_voice.cfg_scale,
                 "render": render_detail,
                 "idle_frame_source": idle_frame_source,
                 "idle_frame_index": idle_frame_index,
@@ -1981,7 +1877,7 @@ async def health() -> JSONResponse:
         pass
 
     providers = ort.get_available_providers()
-    preset_configured, _preset_transcript, preset_problem = _preset_configuration()
+    preset_configured, preset_problem = _preset_configuration()
     body = {
         "server_build": SERVER_BUILD,
         "ok": startup_error is None and tts_ready,
@@ -1989,7 +1885,6 @@ async def health() -> JSONResponse:
         "tts_ready": tts_ready,
         "tts_provider": TTS_PROVIDER,
         "tts_url": TTS_URL,
-        "tts_health_path": TTS_HEALTH_PATH,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
@@ -2044,12 +1939,9 @@ async def health() -> JSONResponse:
         "render_fps_estimate": round(render_fps_estimate, 3),
         "lip_retargeting": AVATAR_LIP_RETARGETING,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
-        "voice_modes": sorted(SUPPORTED_VOICE_MODES),
+        "voice_modes": sorted(VOICE_MODES),
         "preset_voice_configured": preset_configured,
         "preset_voice_status": preset_problem,
-        "design_cfg_scale": TTS_DESIGN_CFG_SCALE,
-        "preset_clone_cfg_scale": TTS_PRESET_CLONE_CFG_SCALE,
-        "preset_direction_cfg_scale": TTS_PRESET_DIRECTION_CFG_SCALE,
         "phrase_first_target_chars": PHRASE_FIRST_TARGET_CHARS,
         "merge_short_opening_phrase": MERGE_SHORT_OPENING_PHRASE,
         "phrase_min_first_chars": PHRASE_MIN_FIRST_CHARS,
@@ -2069,9 +1961,9 @@ async def client_config() -> JSONResponse:
             raise ValueError
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(500, "ICE_SERVERS_JSON must be a JSON array")
-    preset_configured, _preset_transcript, preset_problem = _preset_configuration()
+    preset_configured, preset_problem = _preset_configuration()
     default_mode = TTS_DEFAULT_VOICE_MODE
-    if default_mode not in SUPPORTED_VOICE_MODES:
+    if default_mode not in VOICE_MODES:
         default_mode = VOICE_MODE_DESIGN
     if default_mode != VOICE_MODE_DESIGN and not preset_configured:
         default_mode = VOICE_MODE_DESIGN
@@ -2079,40 +1971,22 @@ async def client_config() -> JSONResponse:
     voice_modes = [
         {
             "id": VOICE_MODE_DESIGN,
-            "label": (
-                "Chatterbox built-in voice"
-                if TTS_PROVIDER == "chatterbox"
-                else "Designed voice"
-            ),
-            "description": (
-                "Use Chatterbox's built-in voice; direction text is ignored."
-                if TTS_PROVIDER == "chatterbox"
-                else "Create a voice from the direction for every request."
-            ),
+            "label": "Chatterbox built-in voice",
+            "description": "Use Chatterbox's built-in voice.",
             "available": True,
-            "cfgScale": TTS_DESIGN_CFG_SCALE,
         },
         {
             "id": VOICE_MODE_PRESET_CLONE,
             "label": "Preset voice (clone)",
-            "description": "Keep the preset identity with a neutral delivery.",
+            "description": "Clone the voice of the reference recording.",
             "available": preset_configured,
-            "cfgScale": TTS_PRESET_CLONE_CFG_SCALE,
         },
-        *([{
-            "id": VOICE_MODE_PRESET_DIRECTION,
-            "label": "Preset voice + direction",
-            "description": "Keep the preset identity and apply the direction.",
-            "available": preset_configured,
-            "cfgScale": TTS_PRESET_DIRECTION_CFG_SCALE,
-        }] if TTS_PROVIDER == "breeze" else []),
     ]
     return JSONResponse(
         {
             "iceServers": ice_servers,
             "voiceModes": voice_modes,
             "defaultVoiceMode": default_mode,
-            "defaultVoiceInstruction": TTS_INSTRUCTION,
             "presetVoiceConfigured": preset_configured,
             "presetVoiceStatus": preset_problem,
             "presetVoiceFilename": (
@@ -2142,14 +2016,14 @@ async def offer(request: Request) -> JSONResponse:
         jobs.add(task)
         task.add_done_callback(jobs.discard)
 
-    async def speak(text: str, instruction: str, voice_mode: str) -> None:
+    async def speak(text: str, voice_mode: str) -> None:
         """Every utterance of the avatar, so the conductor can ignore the
         avatar's own voice while it talks (half-duplex)."""
         if conductor is not None:
             await conductor.on_avatar_speaking(True)
         try:
             await _create_clip(
-                text, instruction, voice_mode, playback, peer_channel.get("channel")
+                text, voice_mode, playback, peer_channel.get("channel")
             )
         finally:
             if conductor is not None:
@@ -2163,7 +2037,7 @@ async def offer(request: Request) -> JSONResponse:
             text = await say_queue.get()
             while playback.busy:  # typed text may still be playing
                 await asyncio.sleep(0.05)
-            await speak(text, TTS_INSTRUCTION, TTS_DEFAULT_VOICE_MODE)
+            await speak(text, TTS_DEFAULT_VOICE_MODE)
 
     class PeerOutput:
         """`AvatarOutput` for this browser session."""
@@ -2297,7 +2171,6 @@ async def offer(request: Request) -> JSONResponse:
                 return
 
             text = str(payload.get("text", "")).strip()
-            instruction = str(payload.get("instruction", TTS_INSTRUCTION)).strip()
             voice_mode = str(
                 payload.get("voice_mode", TTS_DEFAULT_VOICE_MODE)
             ).strip()
@@ -2312,7 +2185,7 @@ async def offer(request: Request) -> JSONResponse:
                     )
                 )
             else:
-                task = asyncio.create_task(speak(text, instruction, voice_mode))
+                task = asyncio.create_task(speak(text, voice_mode))
             jobs.add(task)
             task.add_done_callback(jobs.discard)
 
