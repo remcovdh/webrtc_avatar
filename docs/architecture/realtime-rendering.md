@@ -158,6 +158,25 @@ With TensorRT there is enough speed for **stride 1**: all 25 JoyVASA motion
 frames per second are rendered, instead of every second one. When the buffer
 runs low the server falls back to stride 2 (was 3), so smoothness changes less.
 
+## 8. Catching up within a phrase (after v2Z)
+
+While a phrase is rendered, the next phrase's speech is synthesized on the same
+GPU. That overlap drops rendering below real time (about 22 instead of 34
+frames per second), so the video fell behind the voice within the phrase
+(200-430 ms of frames were skipped) and the phrase ended with too little media
+buffered to cover the start of the next one (a 220 ms silence between
+phrases). The speech start gate did not see this: its speed estimate is
+measured without the overlap.
+
+Each window of frames now reports back whether rendering must catch up: when
+the video is less than one window ahead of the voice, or when another phrase
+follows and less media is buffered than a phrase needs to start. The next
+window then renders every second frame and shows each twice, and returns to
+full rate once the lead is back (`Renderer.render`, `Speaker.needs_catch_up`).
+On the three-phrase test text this removed the skipped frames and the gap at
+the cost of 8-12 held frames out of 72 in the first phrase; the time to first
+playback is unchanged.
+
 ## Settings overview
 
 | Setting | Default | Purpose |

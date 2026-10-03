@@ -331,7 +331,12 @@ class Renderer:
 
         Without `window_callback` all frames are returned at the end. With it,
         frames are handed over per window of `render_window_frames` while
-        rendering continues, and the returned frame list is empty.
+        rendering continues, and the returned frame list is empty. The
+        callback's return value asks for the next window to catch up: when it
+        is true (and adaptive stride is on), only every Nth frame of that
+        window is rendered and shown N times, N being the catch-up stride
+        relative to this phrase's stride. The frame rate of the stream stays
+        the same, so playback timing is unaffected.
         `reset_motion_reference` makes this phrase's first frame FLP's motion
         reference; later phrases of the same utterance keep the first one's.
         Returns (frames, playback fps, timing and settings detail).
@@ -364,12 +369,22 @@ class Renderer:
         window_started = time.perf_counter()
         window_times_ms: list[int] = []
 
+        # How many frames one rendered frame stands for while catching up.
+        hold_factor = (
+            max(1, settings.catchup_render_stride // selected_stride)
+            if settings.adaptive_render_stride
+            else 1
+        )
+        catching_up = False
+        last_frame: np.ndarray | None = None
+        held_count = 0
+
         def publish_window() -> None:
             """Hand the collected frames to the caller and start a new window."""
-            nonlocal window, window_started
+            nonlocal window, window_started, catching_up
             window_ms = round((time.perf_counter() - window_started) * 1000)
             window_times_ms.append(window_ms)
-            window_callback(
+            wants_catch_up = window_callback(
                 window,
                 playback_fps,
                 {
@@ -379,12 +394,27 @@ class Renderer:
                     "motion_frames": len(motion_list),
                 },
             )
+            catching_up = bool(wants_catch_up) and hold_factor > 1
             window = []
             window_started = time.perf_counter()
+
+        def emit(frame: np.ndarray) -> None:
+            if window_callback is None:
+                frames.append(frame)
+            else:
+                window.append(frame)
+                if len(window) >= settings.render_window_frames:
+                    publish_window()
 
         rendered_count = 0
         expected_rendered_frames = math.ceil(len(motion_list) / selected_stride)
         for frame_index in range(0, len(motion_list), selected_stride):
+            if catching_up and last_frame is not None and len(window) % hold_factor:
+                # Behind the voice: show the previous frame again instead of
+                # rendering this one. A window always starts with a real frame.
+                held_count += 1
+                emit(last_frame)
+                continue
             motion = motion_list[frame_index]
             eyes = (
                 eyes_list[frame_index]
@@ -424,14 +454,9 @@ class Renderer:
             if out_crop is None:
                 LOG.warning("Direct renderer returned no face for frame %d", frame_index)
                 continue
-            frame = letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
+            last_frame = letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
             rendered_count += 1
-            if window_callback is None:
-                frames.append(frame)
-            else:
-                window.append(frame)
-                if len(window) >= settings.render_window_frames:
-                    publish_window()
+            emit(last_frame)
 
         if window_callback is not None and window:
             publish_window()
@@ -445,7 +470,9 @@ class Renderer:
             "total_ms": round(total_seconds * 1000),
             "render_stride": selected_stride,
             "motion_frames": len(motion_list),
-            "frames": rendered_count,
+            "frames": rendered_count + held_count,
+            # Frames shown twice (or more) instead of rendered, while catching up.
+            "held_frames": held_count,
             "source_fps": round(source_fps, 3),
             "playback_fps": round(playback_fps, 3),
             "effective_fps": round(

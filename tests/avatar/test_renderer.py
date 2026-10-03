@@ -241,6 +241,48 @@ class RenderLoopTests(unittest.TestCase):
         )
         self.assertTrue(detail["incremental_windows"])
 
+    def catch_up_run(self, wanted: list[bool], **environment: str):
+        """Render 16 frames in windows of 4; `wanted[n]` answers window n+1."""
+        pipeline = FakePipeline(16)
+        shown: list[list[int]] = []
+
+        def collect(frames, fps, info):
+            shown.append([int(frame[256, 256, 0]) for frame in frames])
+            return wanted[info["index"] - 1]
+
+        environment.setdefault("AVATAR_RENDER_WINDOW_FRAMES", "4")
+        _frames, fps, detail = renderer_with(pipeline, **environment).render(
+            Path("a.wav"), window_callback=collect
+        )
+        return pipeline, shown, fps, detail
+
+    def test_a_window_that_must_catch_up_renders_every_second_frame(self) -> None:
+        pipeline, shown, fps, detail = self.catch_up_run([True, False, True, False])
+        self.assertEqual(shown, [
+            [0, 1, 2, 3],        # full
+            [4, 4, 6, 6],        # catching up: each rendered frame shown twice
+            [8, 9, 10, 11],      # full again
+            [12, 12, 14, 14],
+        ])
+        self.assertEqual(fps, 25.0)  # the stream's frame rate does not change
+        self.assertEqual([frame for frame, _first in pipeline.calls],
+                         [0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 14])
+        self.assertEqual((detail["frames"], detail["held_frames"]), (16, 4))
+
+    def test_no_catch_up_without_adaptive_stride_or_at_the_catch_up_stride(self) -> None:
+        always = [True] * 4
+        _p, shown, _fps, detail = self.catch_up_run(
+            always, AVATAR_ADAPTIVE_RENDER_STRIDE="false"
+        )
+        self.assertEqual(detail["held_frames"], 0)
+        self.assertEqual(shown[1], [4, 5, 6, 7])
+        # A phrase already rendered at the catch-up stride cannot go lower.
+        pipeline = FakePipeline(16)
+        _frames, _fps, detail = renderer_with(pipeline).render(
+            Path("a.wav"), render_stride=2, window_callback=lambda *_: True
+        )
+        self.assertEqual(detail["held_frames"], 0)
+
     def test_speed_estimate_is_blended_and_warmup_only_raises_it(self) -> None:
         built = Renderer(load({"AVATAR_EXPECTED_RENDER_FPS": "10"}).settings)
         built.measured_at_warmup(4.0)

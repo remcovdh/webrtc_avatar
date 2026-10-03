@@ -77,6 +77,7 @@ class FakeRenderer:
         self.calls: list[dict] = []
         self.fail: str | None = None
         self.threads: set[int] = set()
+        self.catch_up_answers: list[bool] = []
 
     def measured(self, effective_fps: float) -> None:
         self.fps_estimate = effective_fps or self.fps_estimate
@@ -102,15 +103,16 @@ class FakeRenderer:
             for start in range(0, len(frames), 4):
                 windows += 1
                 self.timeline.append(f"window:{phrase}.{windows}")
-                window_callback(frames[start:start + 4], fps, {
+                self.catch_up_answers.append(window_callback(frames[start:start + 4], fps, {
                     "index": windows, "render_ms": 1,
                     "expected_rendered_frames": len(frames),
                     "motion_frames": self.frames,
-                })
+                }))
         self.timeline.append(f"rendered:{phrase}")
         detail = {
             "motion_ms": 1, "frame_loop_ms": 1, "pipeline_ms": 2, "total_ms": 2,
             "render_stride": stride, "motion_frames": self.frames, "frames": len(frames),
+            "held_frames": 0,
             "source_fps": 25.0, "playback_fps": fps, "effective_fps": 40.0,
             "motion_reference_reset": reset_motion_reference,
             "persistent_phrase_motion": True, "relative_motion": True,
@@ -305,6 +307,61 @@ class WarmupTests(SpeakerCase):
         result = await speaker.warm_up()
         self.assertTrue(result.complete)
         self.assertEqual(int(self.idle.frame[0, 0, 0]), 255)
+
+
+class CatchUpTests(SpeakerCase):
+    """When the speaking flow asks the renderer to catch up."""
+
+    def buffer(self, video_seconds: float, audio_seconds: float) -> PlaybackBuffer:
+        playback = PlaybackBuffer()
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        playback.video.extend((0.0, frame) for _ in range(round(video_seconds * 30)))
+        chunk = np.zeros((1, 960), dtype=np.int16)
+        playback.audio.extend(chunk for _ in range(round(audio_seconds * 50)))
+        return playback
+
+    def test_video_less_than_one_window_ahead_must_catch_up(self) -> None:
+        speaker = self.build()  # windows of 8 frames = 0.32 s at 25 fps
+        self.assertTrue(speaker.needs_catch_up(self.buffer(0.2, 2.0), 25.0, False))
+        self.assertFalse(speaker.needs_catch_up(self.buffer(0.4, 2.0), 25.0, False))
+
+    def test_a_following_phrase_needs_its_start_time_buffered(self) -> None:
+        speaker = self.build()
+        speaker.phrase_start_seconds = 0.5
+        ahead_but_shallow = self.buffer(0.4, 0.4)
+        self.assertTrue(speaker.needs_catch_up(ahead_but_shallow, 25.0, True))
+        self.assertFalse(speaker.needs_catch_up(ahead_but_shallow, 25.0, False))
+        self.assertFalse(speaker.needs_catch_up(self.buffer(0.6, 0.6), 25.0, True))
+
+    def test_fixed_stride_never_catches_up(self) -> None:
+        speaker = self.build(AVATAR_ADAPTIVE_RENDER_STRIDE="false")
+        self.assertFalse(speaker.needs_catch_up(self.buffer(0.0, 0.0), 25.0, True))
+
+    async def test_the_renderer_gets_an_answer_for_every_window(self) -> None:
+        speaker = self.build()
+        await self.speak(speaker)
+        # Phrase 1 at stride 1 is 3 windows; 2 and 3 start on a low buffer, so
+        # they render at the catch-up stride: 5 frames, 2 windows each.
+        self.assertEqual(len(self.renderer.catch_up_answers), 7)
+        self.assertTrue(all(isinstance(a, bool) for a in self.renderer.catch_up_answers))
+        # The measured start time of a phrase replaces the assumption.
+        self.assertLess(speaker.phrase_start_seconds, 0.5)
+
+    async def test_a_failure_does_not_leave_the_render_thread_waiting(self) -> None:
+        speaker = self.build()
+        original = self.playback.append_video_window
+
+        def fail_on_second_window(frames):
+            if self.renderer.catch_up_answers:
+                raise RuntimeError("playback broke")
+            original(frames)
+
+        self.playback.append_video_window = fail_on_second_window
+        started = time.perf_counter()
+        await self.speak(speaker)
+        self.assertEqual(self.channel.of("error")[0]["message"], "playback broke")
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertFalse(speaker.lock.locked())
 
 
 class RenderStrideTests(unittest.TestCase):

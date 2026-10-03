@@ -51,7 +51,7 @@ configuration hash.
 | Variable | Default | Meaning |
 |---|---|---|
 | `AVATAR_RENDER_STRIDE` | 1 | Render every Nth of the 25 motion frames per second; 1 = all. |
-| `AVATAR_ADAPTIVE_RENDER_STRIDE` | true | Switch to the catch-up stride while little media is buffered. |
+| `AVATAR_ADAPTIVE_RENDER_STRIDE` | true | Catch up when rendering falls behind the voice: a phrase that starts on a low buffer uses the catch-up stride, and within a phrase single windows of frames do. |
 | `AVATAR_CATCHUP_RENDER_STRIDE` | 2 | Stride used while the buffer is low. Must be >= the render stride. |
 | `AVATAR_CATCHUP_BUFFER_SECONDS` | 0.75 | Below this much buffered media the catch-up stride is used. |
 | `AVATAR_INCREMENTAL_FRAME_WINDOWS` | true | Publish frames per window instead of per whole phrase. |

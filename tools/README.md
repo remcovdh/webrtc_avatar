@@ -15,6 +15,7 @@ container are fed through `python -` so nothing needs to be copied in.
 | `eval_system2.py` | Retrieval threshold and LLM answers/speed | pause the avatar, then `docker compose run --rm --no-deps -T conductor python - < tools/eval_system2.py` |
 | `run_tests.sh` | Do the unit tests of every service pass on the working tree, without rebuilding an image? | `tools/run_tests.sh` (all), `tools/run_tests.sh conductor`, or `tools/run_tests.sh avatar test_av_sync.py` |
 | `smoke.sh` | Does the avatar still work end to end after a change (configuration, typed speech, a spoken question, errors in the log)? | `tools/smoke.sh` rebuilds and restarts the avatar first; `tools/smoke.sh --no-build` only checks |
+| `timing_compare.py` | Did a change make speech smoother or less smooth (gaps, late or skipped video, held frames, per phrase)? | see its header: make a named timing run, then `tools/timing_compare.py before after` |
 | `config_snapshot.py` | Did a change alter the effective configuration (Compose environment per service + `/health` settings)? | `tools/config_snapshot.py check` on the host; `save` records a new reference in `config/reference/` |
 | `lip_sync_analysis.py` | Does JoyVASA's mouth lead or lag the voice? | see its header |
 

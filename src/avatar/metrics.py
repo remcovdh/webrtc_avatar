@@ -27,6 +27,7 @@ _RENDER_FIELDS = (
     "pipeline_ms",
     "motion_frames",
     "frames",
+    "held_frames",
     "source_fps",
     "playback_fps",
 )
@@ -118,7 +119,7 @@ def log_phrase(log: logging.Logger, metrics: dict[str, Any]) -> None:
         "prefetch_buffer=%.3fs motion=%dms "
         "motion_reference_reset=%s persistent_motion=%s "
         "frame_loop=%dms effective_fps=%.2f windows=%d first_window=%dms "
-        "pipeline=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
+        "pipeline=%dms frames=%d/%d held=%d playback_fps=%.2f media=%.3fs "
         "buffer=%.3fs underrun=%.0fms",
         metrics["chunk"],
         metrics["chunks"],
@@ -147,6 +148,7 @@ def log_phrase(log: logging.Logger, metrics: dict[str, Any]) -> None:
         metrics["render_pipeline_ms"],
         metrics["render_frames"],
         metrics["render_motion_frames"],
+        metrics["render_held_frames"],
         metrics["render_playback_fps"],
         metrics["media_seconds"],
         metrics["buffered_seconds"],

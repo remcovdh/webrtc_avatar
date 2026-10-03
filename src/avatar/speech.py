@@ -12,9 +12,11 @@ the models and can be tested with stand-ins.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +27,7 @@ import numpy as np
 from avatar.config import AvatarSettings
 from avatar.metrics import log_phrase, phrase_metrics
 from avatar.phrases import split_phrases
-from avatar.playback import IdleFrame, PlaybackBuffer
+from avatar.playback import VIDEO_FPS, IdleFrame, PlaybackBuffer
 from avatar.tts_client import PROVIDER, VOICE_MODE_DESIGN, VoiceRequest
 
 LOG = logging.getLogger("avatar.speech")
@@ -114,6 +116,10 @@ class Speaker:
         self.warmup = WarmupResult()
         # Set when the models failed to load; every request then gets this.
         self.unavailable: str | None = None
+        # How long a phrase takes from the start of rendering to its first
+        # window of frames: an assumption until measured. The previous phrase
+        # must leave at least this much media buffered, or there is a gap.
+        self.phrase_start_seconds = 0.5
 
     # ------------------------------------------------------------------
     # Speaking
@@ -356,6 +362,27 @@ class Speaker:
                 first_ready_ms=first_ready_ms,
             )
 
+    def needs_catch_up(
+        self, playback: PlaybackBuffer, fps: float, another_phrase_follows: bool
+    ) -> bool:
+        """Whether the next window of frames should be rendered in catch-up mode.
+
+        Rendering can drop below real time while the next phrase's speech is
+        synthesized on the same GPU. Two things then go wrong unless rendering
+        speeds up: the video falls behind the voice within the phrase (frames
+        are skipped), and the phrase ends with too little media buffered to
+        cover the start of the next one (a gap between the phrases).
+        """
+        if not self.settings.adaptive_render_stride:
+            return False
+        window_seconds = self.settings.render_window_frames / fps
+        if len(playback.video) / VIDEO_FPS < window_seconds:
+            return True  # less than one window ahead of the voice
+        return (
+            another_phrase_follows
+            and playback.buffered_seconds < self.phrase_start_seconds
+        )
+
     async def _synthesize_phrase(
         self, utterance: _Utterance, index: int, prefetched: bool
     ) -> PhraseAudio:
@@ -401,22 +428,35 @@ class Speaker:
         playback = utterance.playback
         count = len(utterance.phrases)
         loop = asyncio.get_running_loop()
-        windows: asyncio.Queue[tuple[list[np.ndarray], float, dict[str, Any]]] = (
-            asyncio.Queue()
-        )
+        windows: asyncio.Queue[
+            tuple[list[np.ndarray], float, dict[str, Any], concurrent.futures.Future]
+        ] = asyncio.Queue()
         render_started = time.perf_counter()
+        another_phrase_follows = index < count
+        # Set when this side stops consuming windows (an error or a cancel), so
+        # the render thread never waits for an answer that will not come.
+        abandoned = threading.Event()
 
         def publish_window(
             frames: list[np.ndarray],
             fps: float,
             detail: dict[str, Any],
-        ) -> None:
-            # Block the worker only until ownership of this small window has moved
-            # to the event loop. GPU rendering resumes while WebRTC consumes it.
+        ) -> bool:
+            """Called on the render thread; returns whether to catch up next."""
+            if abandoned.is_set():
+                return False
+            catch_up: concurrent.futures.Future[bool] = concurrent.futures.Future()
+            # Block the worker only until this small window is queued on the
+            # browser's playback, which is also when the lead over the voice is
+            # known. GPU rendering resumes while WebRTC consumes the window.
             asyncio.run_coroutine_threadsafe(
-                windows.put((frames, fps, detail)),
+                windows.put((frames, fps, detail, catch_up)),
                 loop,
             ).result()
+            try:
+                return catch_up.result(timeout=2.0)
+            except Exception:
+                return False
 
         render_task = asyncio.create_task(
             asyncio.to_thread(
@@ -432,11 +472,12 @@ class Speaker:
         published_windows = 0
         deferred_prefetch_started = False
         deferred_prefetch_buffer_seconds: float | None = None
+        catch_up: concurrent.futures.Future | None = None
 
         try:
             while not render_task.done() or not windows.empty():
                 try:
-                    frames, fps, window_detail = await asyncio.wait_for(
+                    frames, fps, window_detail, catch_up = await asyncio.wait_for(
                         windows.get(),
                         timeout=0.05,
                     )
@@ -459,6 +500,9 @@ class Speaker:
                         (time.perf_counter() - render_started) * 1000
                     )
                     playback.append_video_window(frames)
+                    catch_up.set_result(
+                        self.needs_catch_up(playback, fps, another_phrase_follows)
+                    )
                     published_windows += 1
                     await send_event(
                         utterance.channel,
@@ -475,6 +519,9 @@ class Speaker:
                     )
                 else:
                     playback.append_video_window(frames)
+                    catch_up.set_result(
+                        self.needs_catch_up(playback, fps, another_phrase_follows)
+                    )
                     published_windows += 1
 
                 # Adaptive prefetch is deliberately evaluated only after at least
@@ -491,7 +538,14 @@ class Speaker:
                     deferred_prefetch_started = bool(prefetch_callback())
 
             _unused_frames, _fps, render_detail = await render_task
-        except Exception:
+        except BaseException:
+            abandoned.set()
+            unanswered = [catch_up] if catch_up is not None else []
+            while not windows.empty():
+                unanswered.append(windows.get_nowait()[3])
+            for pending in unanswered:
+                if not pending.done():
+                    pending.set_result(False)
             if not render_task.done():
                 render_task.cancel()
             await asyncio.gather(render_task, return_exceptions=True)
@@ -500,6 +554,9 @@ class Speaker:
         if media_duration is None or first_window_ms is None or published_windows == 0:
             raise RuntimeError("Incremental FLP rendering returned no frame windows")
         playback.finish_phrase_stream()
+        self.phrase_start_seconds = (
+            0.5 * self.phrase_start_seconds + 0.5 * first_window_ms / 1000
+        )
         render_detail["first_window_ms"] = first_window_ms
         render_detail["published_windows"] = published_windows
         render_detail["deferred_prefetch_started"] = deferred_prefetch_started

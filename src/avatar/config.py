@@ -51,7 +51,8 @@ class AvatarSettings:
     # --- Rendering and timing -------------------------------------------
     # Render every Nth of JoyVASA's 25 motion frames per second.
     render_stride: int = _setting(1, PROFILE, minimum=1)
-    # Switch to the catch-up stride while little media is buffered.
+    # Catch up when rendering falls behind the voice: a whole phrase that
+    # starts on a low buffer, or single windows of frames within a phrase.
     adaptive_render_stride: bool = _setting(True, PROFILE)
     catchup_render_stride: int = _setting(2, PROFILE, minimum=1)
     catchup_buffer_seconds: float = _setting(0.75, PROFILE, minimum=0.0)
