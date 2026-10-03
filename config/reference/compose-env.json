@@ -21,13 +21,11 @@
     "LISTENER_SOCKET": "/run/avatar/listener.sock"
   },
   "tts": {
-    "BREEZE_FAST_ARGS": "--fast-depth-decoder --fast-codec --fast-backbone-decode",
     "CHATTERBOX_CFG_WEIGHT": "0.5",
     "CHATTERBOX_DEVICE": "cuda",
     "CHATTERBOX_EXAGGERATION": "0.5",
     "CHATTERBOX_LANGUAGE": "en",
-    "CHATTERBOX_VARIANT": "turbo",
-    "TTS_PROVIDER": "chatterbox"
+    "CHATTERBOX_VARIANT": "turbo"
   },
   "webrtc-avatar": {
     "ADAPTIVE_RENDER_STRIDE": "true",
@@ -44,23 +42,13 @@
     "AVATAR_LIP_RETARGETING": "false",
     "AVATAR_LIP_SYNC_OFFSET_MS": "80",
     "AVATAR_NORMALIZE_LIP": "true",
-    "AVATAR_PASTE_BACK": "false",
     "AVATAR_PATH": "/workspace/inputs/avatar.jpg",
     "AVATAR_RELATIVE_MOTION": "true",
     "AVATAR_TENSORRT": "true",
     "AVATAR_TENSORRT_CACHE": "/workspace/trt-cache",
-    "BREEZE_DESIGN_CFG_SCALE": "4",
-    "BREEZE_PRESET_AUDIO_PATH": "/workspace/inputs/voice-preset-nohello.wav",
-    "BREEZE_PRESET_CLONE_CFG_SCALE": "1",
-    "BREEZE_PRESET_CLONE_INSTRUCTION": "Speak naturally in the reference voice.",
-    "BREEZE_PRESET_DIRECTION_CFG_SCALE": "4",
-    "BREEZE_PRESET_TRANSCRIPT": "",
-    "BREEZE_PRESET_TRANSCRIPT_FILE": "/workspace/inputs/voice-preset-nohello.txt",
-    "BREEZE_VOICE_INSTRUCTION": "A warm, clear, natural voice with a calm conversational delivery.",
     "CATCHUP_BUFFER_SECONDS": "0.75",
     "CATCHUP_RENDER_STRIDE": "2",
     "CONDUCTOR_SOCKET": "/run/avatar/conductor.sock",
-    "DIRECT_MEMORY_RENDER": "true",
     "EXPECTED_RENDER_FPS": "9.0",
     "FLP_CONFIG_PATH": "/workspace/FasterLivePortrait/configs/onnx_infer.yaml",
     "HTTPS_CERT_DIR": "/workspace/certs",
@@ -74,22 +62,17 @@
     "PHRASE_MAX_CHARS": "160",
     "PHRASE_MIN_FIRST_CHARS": "24",
     "PHRASE_TARGET_CHARS": "100",
-    "PROGRESSIVE_PHRASE_MODE": "true",
     "RENDER_STRIDE": "1",
     "RENDER_WINDOW_FRAMES": "8",
     "SPEECH_START_GATE": "true",
     "SPEECH_START_SAFETY": "1.15",
-    "STARTUP_WARMUP": "true",
     "TTS_DEFAULT_VOICE_MODE": "preset-clone",
     "TTS_PREFETCH": "true",
     "TTS_PREFETCH_MIN_BUFFER_SECONDS": "0.50",
     "TTS_PREFETCH_POLICY": "adaptive",
-    "TTS_PROVIDER": "chatterbox",
-    "TTS_STARTUP_POLL_SECONDS": "2",
-    "TTS_STARTUP_WAIT_SECONDS": "300",
+    "TTS_PRESET_AUDIO_PATH": "/workspace/inputs/voice-preset-nohello.wav",
     "TTS_URL": "http://127.0.0.1:7860",
     "USE_NEURAL_IDLE_FRAME": "true",
-    "WARMUP_IDLE_FRAME_INDEX": "0",
-    "WARMUP_TEXT": "Hello."
+    "WARMUP_IDLE_FRAME_INDEX": "0"
   }
 }

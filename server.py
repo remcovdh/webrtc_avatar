@@ -91,7 +91,9 @@ TTS_DEFAULT_VOICE_MODE = os.getenv(
     "TTS_DEFAULT_VOICE_MODE", "preset-clone"
 ).strip().lower()
 TTS_SEED = 42
-MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
+# Guidance scale of JoyVASA's audio-to-motion diffusion.
+JOYVASA_CFG_SCALE = 2.8
+MAX_TEXT_LENGTH = 500
 INCREMENTAL_FRAME_WINDOWS = _env_bool("INCREMENTAL_FRAME_WINDOWS", True)
 RENDER_WINDOW_FRAMES = max(1, int(os.getenv("RENDER_WINDOW_FRAMES", "8")))
 RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
@@ -123,16 +125,14 @@ CONDUCTOR_SOCKET = os.getenv("CONDUCTOR_SOCKET", "").strip()
 # When set, every rendered phrase saves its WAV and JoyVASA motion here so
 # motion problems can be analysed offline.
 DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
-STARTUP_WARMUP = _env_bool("STARTUP_WARMUP", True)
-WARMUP_TEXT = os.getenv("WARMUP_TEXT", "Hello.").strip() or "Hello."
+# Spoken once at startup so the first user request finds every model loaded;
+# its first frame also becomes the idle image.
+WARMUP_TEXT = "Hello."
 USE_NEURAL_IDLE_FRAME = _env_bool("USE_NEURAL_IDLE_FRAME", True)
 WARMUP_IDLE_FRAME_INDEX = int(os.getenv("WARMUP_IDLE_FRAME_INDEX", "0"))
-TTS_STARTUP_WAIT_SECONDS = max(
-    0.0, float(os.getenv("TTS_STARTUP_WAIT_SECONDS", "300"))
-)
-TTS_STARTUP_POLL_SECONDS = max(
-    0.25, float(os.getenv("TTS_STARTUP_POLL_SECONDS", "2"))
-)
+# How long the warm-up waits for the TTS service, and how often it checks.
+TTS_STARTUP_WAIT_SECONDS = 300.0
+TTS_STARTUP_POLL_SECONDS = 2.0
 TTS_PREFETCH = _env_bool("TTS_PREFETCH", False)
 TTS_PREFETCH_POLICY = os.getenv("TTS_PREFETCH_POLICY", "adaptive").strip().lower()
 if TTS_PREFETCH_POLICY not in {"adaptive", "eager"}:
@@ -361,7 +361,7 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     cfg.infer_params.flag_normalize_lip = AVATAR_NORMALIZE_LIP
     cfg.infer_params.flag_eye_retargeting = AVATAR_EYE_RETARGETING
     cfg.infer_params.flag_lip_retargeting = AVATAR_LIP_RETARGETING
-    cfg.infer_params.cfg_scale = float(os.getenv("JOYVASA_CFG_SCALE", "2.8"))
+    cfg.infer_params.cfg_scale = JOYVASA_CFG_SCALE
 
     LOG.info(
         "Visual motion config: region=%s multiplier=%.2f normalize_lip=%s "
@@ -1845,8 +1845,7 @@ async def lifespan(_app: FastAPI):
         BASE_AVATAR = _load_avatar()
         LOG.info("Loading FasterLivePortrait and source portrait")
         pipeline = await asyncio.to_thread(_initialize_pipeline)
-        if STARTUP_WARMUP:
-            await _warmup_pipeline()
+        await _warmup_pipeline()
         LOG.info("Avatar pipeline is ready")
     except Exception as exc:
         startup_error = str(exc)
@@ -1897,7 +1896,6 @@ async def health() -> JSONResponse:
         "catchup_render_stride": CATCHUP_RENDER_STRIDE,
         "catchup_buffer_seconds": CATCHUP_BUFFER_SECONDS,
         "render_stride": RENDER_STRIDE,
-        "startup_warmup_enabled": STARTUP_WARMUP,
         "startup_warmup_complete": warmup_complete,
         "startup_warmup_seconds": (
             round(warmup_seconds, 3) if warmup_seconds is not None else None
@@ -1907,8 +1905,6 @@ async def health() -> JSONResponse:
         "neural_idle_frame_enabled": USE_NEURAL_IDLE_FRAME,
         "idle_frame_source": idle_frame_source,
         "idle_frame_index": idle_frame_index,
-        "tts_startup_wait_limit_seconds": TTS_STARTUP_WAIT_SECONDS,
-        "tts_startup_poll_seconds": TTS_STARTUP_POLL_SECONDS,
         "tts_startup_wait_seconds": (
             round(tts_startup_wait_seconds, 3)
             if tts_startup_wait_seconds is not None

@@ -204,22 +204,14 @@ services:
       # continued the reference sentence ("Hello, I am your friendly virtual
       # assistant...") whenever a reply also started with "Hello".
       TTS_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset-nohello.wav}"
-      # v2A initializes the TTS, HuBERT, JoyVASA and the renderer before the
-      # browser can submit its first request. Failure is reported but nonfatal.
-      STARTUP_WARMUP: "true"
-      WARMUP_TEXT: "Hello."
       # Show an already-rendered, aligned warm-up frame while idle. The source
       # photo remains hidden, avoiding the large pose/crop jump at first speech.
       USE_NEURAL_IDLE_FRAME: "${AVATAR_USE_NEURAL_IDLE_FRAME:-true}"
       # Frame zero normally has the neutral initial JoyVASA pose. This can be
       # changed for diagnosis without rebuilding the image.
       WARMUP_IDLE_FRAME_INDEX: "${AVATAR_WARMUP_IDLE_FRAME_INDEX:-0}"
-      # Protect manual or partial Compose starts: wait for the TTS provider instead of
-      # failing warm-up immediately when port 7860 is not ready yet.
-      TTS_STARTUP_WAIT_SECONDS: "300"
-      TTS_STARTUP_POLL_SECONDS: "2"
-      # Progressive phrase playback: generate phrase 1, start playback, then
-      # generate later phrases while the current media queue is consumed.
+      # Phrase splitting: phrase 1 starts playback while later phrases are
+      # generated, so the first one is kept short.
       PHRASE_FIRST_TARGET_CHARS: "${AVATAR_PHRASE_FIRST_TARGET_CHARS:-48}"
       MERGE_SHORT_OPENING_PHRASE: "${AVATAR_MERGE_SHORT_OPENING_PHRASE:-true}"
       PHRASE_MIN_FIRST_CHARS: "${AVATAR_PHRASE_MIN_FIRST_CHARS:-24}"

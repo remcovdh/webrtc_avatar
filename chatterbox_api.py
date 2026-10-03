@@ -26,7 +26,7 @@ LANGUAGE = os.getenv("CHATTERBOX_LANGUAGE", "en").strip().lower()
 OUTPUT_RATE = 24_000
 EXAGGERATION = float(os.getenv("CHATTERBOX_EXAGGERATION", "0.5"))
 CFG_WEIGHT = float(os.getenv("CHATTERBOX_CFG_WEIGHT", "0.5"))
-MAX_REFERENCE_BYTES = int(os.getenv("CHATTERBOX_MAX_REFERENCE_BYTES", "20000000"))
+MAX_REFERENCE_BYTES = 20_000_000
 
 model = None
 model_lock = asyncio.Lock()

@@ -39,7 +39,7 @@ JEVK5_MODEL = os.getenv(
     "SYSTEM1_MODEL", "alibiserikbay/JevK5-GGUF::jevk5-4b-v0.3-Q4_K_M.gguf"
 )
 # Softmax temperature of the option-logit readout (JevK5 v0.3's jevk5_config.json).
-JEVK5_TEMPERATURE = float(os.getenv("SYSTEM1_TEMPERATURE", "1.22"))
+JEVK5_TEMPERATURE = 1.22
 FIELDS = ("intent", "emotion")
 
 

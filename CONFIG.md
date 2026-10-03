@@ -5,8 +5,9 @@ comes from, and what kind of setting it is. This is the working document of the
 configuration refactoring; `tools/config_snapshot.py check` verifies that the
 running stack still matches `config/reference/`.
 
-State: commit `1baa50c` (v2W), before pruning. The **Decision** column says
-what happens to the variable.
+State: after pruning (step 2 of the refactoring). Defaults, names and
+validation are still as they were; the next steps fix those. The **Decision**
+column says what happens to the variable.
 
 ## Why this exists
 
@@ -17,8 +18,8 @@ what happens to the variable.
   head motion, lip offset 0).
 - Most avatar settings have two names: `AVATAR_X` on the host, `X` in the
   container.
-- Combinations are not validated; 13 values are silently corrected with
-  `max(...)`.
+- Combinations are not validated, and out-of-range values are silently
+  corrected with `max(...)` instead of rejected.
 
 ## Classes
 
@@ -27,8 +28,6 @@ what happens to the variable.
 | **profile** | Changes render, timing or motion behaviour | A named profile; override allowed and reported |
 | **experiment** | Diagnosis or rollback switch, not part of normal use | Settings class, reported loudly when changed |
 | **deployment** | Paths, ports, sockets, URLs, model names | Compose / `.env` |
-| **constant** | Never varied in practice | Code constant, no environment variable |
-| **dead** | Only one value is ever used, or it serves a removed feature | Removed |
 
 ## Avatar (`server.py`, `serve.py`, `entrypoint.sh`)
 
@@ -78,7 +77,7 @@ container actually gets. **Bold** marks a disagreement.
 | `RESULTS_ROOT` | – | /workspace/results | (unset) | deployment | keep |
 | `AVATAR_TENSORRT_CACHE` | – | /workspace/trt-cache | same | deployment | keep |
 | `TTS_URL` | same | http://127.0.0.1:7860 | same | deployment | keep |
-| `BREEZE_PRESET_AUDIO_PATH` | `AVATAR_PRESET_AUDIO_PATH` | **voice-preset.wav** | **voice-preset-nohello.wav** | deployment | keep, renamed to a neutral name |
+| `TTS_PRESET_AUDIO_PATH` | `AVATAR_PRESET_AUDIO_PATH` | **voice-preset.wav** | **voice-preset-nohello.wav** | deployment | keep |
 | `LISTENER_SOCKET` | `AVATAR_LISTENER_SOCKET` | (empty = off) | /run/avatar/listener.sock | deployment | keep |
 | `CONDUCTOR_SOCKET` | `AVATAR_CONDUCTOR_SOCKET` | (empty = off) | /run/avatar/conductor.sock | deployment | keep |
 | `ICE_SERVERS_JSON` | – | [] | [] | deployment | keep |
@@ -89,27 +88,6 @@ container actually gets. **Bold** marks a disagreement.
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | – | set by `entrypoint.sh` | – | deployment | keep (internal) |
 | `FLP_CHECKPOINT_DIR` | – | FLP checkpoints | (unset) | deployment | keep |
 | `LOG_LEVEL` | – | INFO | (unset) | deployment | keep (all services) |
-| `STARTUP_WARMUP` | – | true | "true" (fixed) | constant | always warm up |
-| `WARMUP_TEXT` | – | Hello. | "Hello." (fixed) | constant | |
-| `TTS_STARTUP_WAIT_SECONDS` | – | 300 | "300" (fixed) | constant | |
-| `TTS_STARTUP_POLL_SECONDS` | – | 2 | "2" (fixed) | constant | |
-| `MAX_TEXT_LENGTH` | – | 500 | (unset) | constant | |
-| `JOYVASA_CFG_SCALE` | – | 2.8 | (unset) | constant | |
-| `BREEZE_SEED` | – | 42 | (unset) | constant | becomes `TTS_SEED = 42` |
-| `AVATAR_PASTE_BACK` | – | false | "false" (fixed) | dead | remove with the legacy render route |
-| `DIRECT_MEMORY_RENDER` | – | true | "true" (fixed) | dead | remove with the legacy render route |
-| `PROGRESSIVE_PHRASE_MODE` | – | true | "true" (fixed) | dead | remove |
-| `TTS_PROVIDER` | same | chatterbox | chatterbox | dead | Breeze removed; Chatterbox is the only provider |
-| `BREEZE_TTS_URL` | – | fallback for `TTS_URL` | (unset) | dead | Breeze |
-| `TTS_HEALTH_PATH` | – | /health (/docs for Breeze) | (unset) | dead | constant `/health` |
-| `BREEZE_DEFAULT_VOICE_MODE` | – | fallback | (unset) | dead | Breeze |
-| `BREEZE_VOICE_INSTRUCTION` | – | "A warm, clear…" | fixed | dead | Chatterbox ignores it |
-| `BREEZE_DESIGN_CFG_SCALE`, `BREEZE_CFG_SCALE` | – | 4 | "4" (fixed) | dead | Chatterbox ignores it |
-| `BREEZE_PRESET_CLONE_CFG_SCALE` | – | 1 | "1" (fixed) | dead | Chatterbox ignores it |
-| `BREEZE_PRESET_DIRECTION_CFG_SCALE` | – | 4 | "4" (fixed) | dead | Breeze-only voice mode |
-| `BREEZE_PRESET_CLONE_INSTRUCTION` | – | "Speak naturally…" | fixed | dead | Chatterbox ignores it |
-| `BREEZE_PRESET_TRANSCRIPT` | – | (empty) | "" (fixed) | dead | only Breeze needs the transcript |
-| `BREEZE_PRESET_TRANSCRIPT_FILE` | `AVATAR_PRESET_TRANSCRIPT_FILE` | voice-preset.txt | voice-preset-nohello.txt | dead | only Breeze needs the transcript |
 
 ## TTS (`chatterbox_api.py`, `entrypoint.sh`, build arguments)
 
@@ -120,13 +98,8 @@ container actually gets. **Bold** marks a disagreement.
 | `CHATTERBOX_LANGUAGE` | en | en | profile | keep (multilingual variant only) |
 | `CHATTERBOX_EXAGGERATION` | 0.5 | 0.5 | profile | keep (`original` variant only) |
 | `CHATTERBOX_CFG_WEIGHT` | 0.5 | 0.5 | profile | keep (`original` variant only) |
-| `CHATTERBOX_MAX_REFERENCE_BYTES` | 20000000 | (unset) | constant | |
 | `CHATTERBOX_PORT` | 7860 | (unset) | deployment | keep |
 | `CHATTERBOX_VERSION` (build) | 0.1.7 | 0.1.7 | deployment | keep |
-| `TTS_PROVIDER` | – | chatterbox | dead | Breeze |
-| `BREEZE_FAST_ARGS` | – | fast-path flags | dead | Breeze |
-| `BREEZE_MODEL_DIR`, `BREEZE_PORT` | entrypoint | (unset) | dead | Breeze |
-| `BREEZE_INSTALL_FLASH_ATTN`, `FLASH_ATTN_CUDA_ARCHS`, `BREEZE_REF` (build) | – | 0 / 120 / main | dead | Breeze |
 
 ## Listener (`listener_worker.py`)
 
@@ -167,13 +140,30 @@ container actually gets. **Bold** marks a disagreement.
 | `TURN_CONNECTIVES` | and,but,…,als | (unset) | profile | keep |
 | `LISTENER_MIN_SILENCE_MS` | 300 | 300 | profile | keep; must equal the listener's value |
 | `PTT_FINAL_WAIT_MS` | 1500 | (unset) | profile | keep |
-| `SYSTEM1_TEMPERATURE` | 1.22 | (unset) | constant | belongs to the model file |
 | `SYSTEM2_MAX_TOKENS` | 120 | (unset) | profile | keep |
 | `REVIEW_UNSURE_BELOW` | 0.6 | (unset) | profile | keep |
 | `REVIEW_REPEAT_SIMILARITY` | 0.88 | (unset) | profile | keep |
 
 The listener, conductor and TTS settings have one name and agreeing defaults;
 the problems above are concentrated in the avatar service.
+
+## Removed in step 2
+
+Became code constants (never varied in practice): `STARTUP_WARMUP`, `WARMUP_TEXT`, `TTS_STARTUP_WAIT_SECONDS`, `TTS_STARTUP_POLL_SECONDS`, `MAX_TEXT_LENGTH`, `JOYVASA_CFG_SCALE`, `BREEZE_SEED`, `CHATTERBOX_MAX_REFERENCE_BYTES`, `SYSTEM1_TEMPERATURE`.
+
+Removed outright:
+
+- Dead flags that only kept the legacy MP4 render route alive:
+  `AVATAR_PASTE_BACK`, `DIRECT_MEMORY_RENDER`, `PROGRESSIVE_PHRASE_MODE`. The
+  legacy renderer went with them.
+- Breeze TTS (too heavy to share the GPU with the renderer; unused since
+  Chatterbox became the default in v2L): `TTS_PROVIDER`, `BREEZE_TTS_URL`, `TTS_HEALTH_PATH`, `BREEZE_DEFAULT_VOICE_MODE`, `BREEZE_VOICE_INSTRUCTION`, `BREEZE_DESIGN_CFG_SCALE`, `BREEZE_CFG_SCALE`, `BREEZE_PRESET_CLONE_CFG_SCALE`, `BREEZE_PRESET_DIRECTION_CFG_SCALE`, `BREEZE_PRESET_CLONE_INSTRUCTION`, `BREEZE_PRESET_TRANSCRIPT`, `BREEZE_PRESET_TRANSCRIPT_FILE`, `BREEZE_FAST_ARGS`, `BREEZE_MODEL_DIR`, `BREEZE_PORT`, `BREEZE_INSTALL_FLASH_ATTN`, `FLASH_ATTN_CUDA_ARCHS`, `BREEZE_REF` (build).
+  With it went the voice direction, the CFG scales, the preset transcript and
+  the `preset-direction` voice mode; `design` (Chatterbox's built-in voice) and
+  `preset-clone` remain.
+- `.env.before-facial-test`. `.env.example` no longer repeats defaults.
+
+The avatar service went from 60 to 44 variables.
 
 ## Not part of this
 

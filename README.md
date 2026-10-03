@@ -2,6 +2,15 @@
 
 Current build: `neural-avatar-v2w-jevk5-review`
 
+## Configuration
+
+`CONFIG.md` lists every setting with its default, owner and meaning, and is the
+reference from now on. The configuration is being simplified: Breeze TTS, the
+legacy MP4 render route (`AVATAR_PASTE_BACK`, `DIRECT_MEMORY_RENDER`), the
+voice direction and CFG scales, and several never-varied settings have been
+removed. The sections below are the history of earlier versions and still
+mention them.
+
 ## v2W JevK5 and the conversation review
 
 Build `neural-avatar-v2w-jevk5-review` classifies what you say with JevK5 (far better than Laya, especially
