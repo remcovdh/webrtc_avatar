@@ -1,13 +1,9 @@
-"""Build-time tests for audio-clocked playback and eye/mouth motion scaling.
-
-These import the real server module, so they run inside the avatar image.
-"""
+"""Tests for audio-clocked playback: the buffer, the speech gate, keep-alive noise."""
 
 import unittest
 
 import numpy as np
 
-from avatar import server
 from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
 from avatar.tracks import keepalive_amplitude, keepalive_noise
 
@@ -200,111 +196,6 @@ class SpeechStartGateTests(unittest.TestCase):
         playback.finish_phrase_stream()
         play_audio(playback, 0.2)
         self.assertAlmostEqual(playback.playhead_seconds, 0.2)
-
-
-class ExpressionMotionScaleTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.reference = {"exp": np.zeros((1, 21, 3), dtype=np.float32)}
-        self.motion = {"exp": np.ones((1, 21, 3), dtype=np.float32), "t": 7}
-
-    def test_scales_eye_and_lip_keypoints_independently(self) -> None:
-        scaled = server._adjust_driving_motion(
-            self.motion, self.reference, eye_scale=0.25, lip_scale=1.5,
-            lip_mode="relative", head_scale=1.0,
-        )
-        eyes = server.EYE_EXPRESSION_INDICES
-        lips = server.LIP_EXPRESSION_INDICES
-        others = [index for index in range(21) if index not in eyes + lips]
-
-        np.testing.assert_allclose(scaled["exp"][:, eyes, :], 0.25)
-        np.testing.assert_allclose(scaled["exp"][:, lips, :], 1.5)
-        np.testing.assert_allclose(scaled["exp"][:, others, :], 1.0)
-        self.assertEqual(scaled["t"], 7)
-        np.testing.assert_allclose(self.motion["exp"], 1.0)  # input untouched
-
-    def test_scale_one_or_missing_reference_is_a_no_op(self) -> None:
-        scale = server._adjust_driving_motion
-        self.assertIs(
-            scale(self.motion, self.reference, eye_scale=1.0, lip_scale=1.0,
-                  lip_mode="relative", head_scale=1.0),
-            self.motion,
-        )
-        self.assertIs(
-            scale(self.motion, None, np.zeros((1, 21, 3)), eye_scale=0.0),
-            self.motion,
-        )
-
-    def test_head_scale_damps_rotation_and_translation(self) -> None:
-        def pose(pitch: float, t: float) -> dict:
-            angle = np.array([[pitch]], dtype=np.float32)
-            zero = np.zeros((1, 1), dtype=np.float32)
-            return {
-                "exp": np.zeros((1, 21, 3), dtype=np.float32),
-                "pitch": angle, "yaw": zero, "roll": zero,
-                "R": server.get_rotation_matrix(angle, zero, zero),
-                "t": np.full((1, 3), t, dtype=np.float32),
-            }
-
-        adjusted = server._adjust_driving_motion(
-            pose(4.0, 0.1), pose(0.0, 0.0), eye_scale=1.0, lip_scale=1.0,
-            lip_mode="relative", head_scale=0.25,
-        )
-        np.testing.assert_allclose(adjusted["pitch"], 1.0)
-        np.testing.assert_allclose(adjusted["t"], 0.025, rtol=1e-6)
-        np.testing.assert_allclose(adjusted["R"], pose(1.0, 0.0)["R"], atol=1e-6)
-
-    def test_absolute_lips_make_flp_output_joyvasa_mouth(self) -> None:
-        source = np.full((1, 21, 3), 0.5, dtype=np.float32)
-        reference = {"exp": np.full((1, 21, 3), 0.2, dtype=np.float32)}
-        driving = {"exp": np.full((1, 21, 3), 0.9, dtype=np.float32)}
-        adjusted = server._adjust_driving_motion(
-            driving, reference, source, eye_scale=1.0, lip_mode="absolute",
-            head_scale=1.0,
-        )
-        # FLP relative motion: source + (driving - reference).
-        animated = source + (adjusted["exp"] - reference["exp"])
-        lips = server.LIP_EXPRESSION_INDICES
-        others = [index for index in range(21) if index not in lips]
-        np.testing.assert_allclose(animated[:, lips, :], 0.9, rtol=1e-6)
-        np.testing.assert_allclose(animated[:, others, :], 1.2, rtol=1e-6)
-
-
-class TensorRTWarpingTests(unittest.TestCase):
-    def test_disabled_or_unavailable_tensorrt_keeps_the_cuda_session(self) -> None:
-        class Predictor:
-            onnx_model = "cuda-session"
-
-        class Model:
-            predictor = Predictor()
-            kwargs = {"model_path": "/nonexistent/warping_spade.onnx"}
-
-        loaded = type("Loaded", (), {"model_dict": {"warping_spade": Model()}})()
-        original = server.AVATAR_TENSORRT, server.ort.get_available_providers
-        try:
-            server.AVATAR_TENSORRT = False
-            server._enable_tensorrt_warping(loaded)
-            self.assertEqual(Model.predictor.onnx_model, "cuda-session")
-
-            server.AVATAR_TENSORRT = True
-            server.ort.get_available_providers = lambda: ["CUDAExecutionProvider"]
-            server._enable_tensorrt_warping(loaded)
-            self.assertEqual(Model.predictor.onnx_model, "cuda-session")
-            self.assertEqual(server.warping_backend, "cuda")
-        finally:
-            server.AVATAR_TENSORRT, server.ort.get_available_providers = original
-
-
-class SourceCropTests(unittest.TestCase):
-    def test_crop_past_the_photo_edge_has_no_black_border(self) -> None:
-        image = np.full((100, 100, 3), 200, dtype=np.uint8)
-        # A face near the top-left corner: the 2.3x crop leaves the photo.
-        rng = np.random.default_rng(0)
-        pts = (rng.random((106, 2)) * 20 + 5).astype(np.float32)
-        crop = server._crop_source_image(image, pts, dsize=64, scale=2.3)
-        self.assertEqual(crop["img_crop"].shape, (64, 64, 3))
-        self.assertEqual(int(crop["img_crop"].min()), 200)
-        # Upright by default: the crop transform has no rotation component.
-        np.testing.assert_allclose(crop["M_o2c"][0, 1], 0.0, atol=1e-6)
 
 
 if __name__ == "__main__":

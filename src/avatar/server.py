@@ -49,6 +49,7 @@ from src.utils.utils import get_rotation_matrix
 from avatar import config as avatar_config
 from avatar.conductor_client import ConductorClient
 from avatar.phrases import split_phrases
+from avatar.renderer import Renderer, load_avatar
 from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
 from avatar.tracks import AvatarAudioTrack, AvatarVideoTrack
 from avatar.tts_client import PROVIDER as TTS_PROVIDER
@@ -94,6 +95,7 @@ AVATAR_PATH = Path(SETTINGS.image_path)
 CONFIG_PATH = Path(SETTINGS.flp_config_path)
 RESULTS_ROOT = Path(SETTINGS.results_root)
 TTS = TtsClient(SETTINGS)
+RENDERER = Renderer(SETTINGS)
 TTS_DEFAULT_VOICE_MODE = SETTINGS.default_voice_mode
 # Guidance scale of JoyVASA's audio-to-motion diffusion.
 JOYVASA_CFG_SCALE = 2.8
@@ -176,7 +178,6 @@ PHRASE_TARGET_CHARS = SETTINGS.phrase_target_chars
 PHRASE_MAX_CHARS = SETTINGS.phrase_max_chars
 
 pcs: set[RTCPeerConnection] = set()
-pipeline: GradioLivePortraitPipeline | None = None
 startup_error: str | None = None
 inference_lock = asyncio.Lock()
 warmup_complete = False
@@ -184,8 +185,6 @@ warmup_seconds: float | None = None
 warmup_metrics: dict[str, Any] = {}
 warmup_error: str | None = None
 tts_startup_wait_seconds: float | None = None
-warping_backend = "cuda"
-render_fps_estimate = EXPECTED_RENDER_FPS
 
 
 
@@ -195,160 +194,22 @@ render_fps_estimate = EXPECTED_RENDER_FPS
 
 
 
-# JoyVASA's official motion checkpoint stores its configuration as an
-# argparse.Namespace. PyTorch 2.6+ blocks that class by default when loading
-# weights. Allowlist only this known, inert configuration container while
-# retaining weights_only=True for every other checkpoint global.
-torch.serialization.add_safe_globals([argparse.Namespace])
 
 
-def _letterbox(image: np.ndarray, size: int = 512) -> np.ndarray:
-    """Fit an image into a square without stretching it."""
-    height, width = image.shape[:2]
-    scale = min(size / width, size / height)
-    resized = cv2.resize(
-        image,
-        (max(1, round(width * scale)), max(1, round(height * scale))),
-        interpolation=cv2.INTER_AREA,
-    )
-    canvas = np.zeros((size, size, 3), dtype=np.uint8)
-    y = (size - resized.shape[0]) // 2
-    x = (size - resized.shape[1]) // 2
-    canvas[y : y + resized.shape[0], x : x + resized.shape[1]] = resized
-    return canvas
 
 
-def _load_avatar() -> np.ndarray:
-    if not AVATAR_PATH.is_file():
-        raise FileNotFoundError(
-            f"Missing {AVATAR_PATH}. Mount ./inputs and add inputs/avatar.jpg."
-        )
-    image = cv2.imread(str(AVATAR_PATH), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ValueError(f"OpenCV could not decode {AVATAR_PATH}")
-    return _letterbox(image)
 
 
 # The image shown while idle; every playback buffer reads it.
 IDLE_FRAME = IdleFrame()
 
 
-_FLP_CROP_IMAGE = flp_pipeline.crop_image
 
 
-def _crop_source_image(img: np.ndarray, pts: np.ndarray, **kwargs: Any) -> dict:
-    """FLP's source crop, upright by default and without black borders.
-
-    The face crop (2.3x the face size) reaches past the edges of a tightly
-    framed portrait; FLP filled that with black bands. Redo the same warp with
-    mirrored edges so the background and hair continue instead.
-    """
-    kwargs.setdefault("flag_do_rot", AVATAR_CROP_ROTATION)
-    crop = _FLP_CROP_IMAGE(img, pts, **kwargs)
-    dsize = kwargs.get("dsize", 224)
-    crop["img_crop"] = cv2.warpAffine(
-        img,
-        crop["M_o2c"][:2],
-        (dsize, dsize),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT_101,
-    )
-    return crop
 
 
-def _initialize_pipeline() -> GradioLivePortraitPipeline:
-    """Load FasterLivePortrait and precompute the source portrait."""
-    if not CONFIG_PATH.is_file():
-        raise FileNotFoundError(f"FasterLivePortrait config missing: {CONFIG_PATH}")
-
-    LOG.info(
-        "Runtime: torch=%s torch_cuda=%s onnxruntime=%s providers=%s",
-        torch.__version__,
-        torch.version.cuda,
-        ort.__version__,
-        ort.get_available_providers(),
-    )
-
-    cfg = OmegaConf.load(CONFIG_PATH)
-    # The face crop is the output. Pasting it back into the photograph needs
-    # a GPU matrix inverse per frame, which failed on a GPU shared with TTS.
-    cfg.infer_params.flag_pasteback = False
-    # Relative motion maps driving deltas onto the source pose. Persistence
-    # below then keeps one reference across all phrases in an utterance.
-    cfg.infer_params.flag_relative_motion = AVATAR_RELATIVE_MOTION
-    cfg.infer_params.flag_stitching = True
-    cfg.infer_params.animation_region = AVATAR_ANIMATION_REGION
-    cfg.infer_params.driving_multiplier = AVATAR_DRIVING_MULTIPLIER
-    cfg.infer_params.flag_normalize_lip = AVATAR_NORMALIZE_LIP
-    cfg.infer_params.flag_eye_retargeting = AVATAR_EYE_RETARGETING
-    cfg.infer_params.flag_lip_retargeting = AVATAR_LIP_RETARGETING
-    cfg.infer_params.cfg_scale = JOYVASA_CFG_SCALE
-
-    LOG.info(
-        "Visual motion config: region=%s multiplier=%.2f normalize_lip=%s "
-        "eye_retargeting=%s lip_retargeting=%s",
-        AVATAR_ANIMATION_REGION,
-        AVATAR_DRIVING_MULTIPLIER,
-        AVATAR_NORMALIZE_LIP,
-        AVATAR_EYE_RETARGETING,
-        AVATAR_LIP_RETARGETING,
-    )
-
-    flp_pipeline.crop_image = _crop_source_image
-    loaded = GradioLivePortraitPipeline(cfg=cfg, is_animal=False)
-    _enable_tensorrt_warping(loaded)
-    if not loaded.prepare_source(str(AVATAR_PATH), realtime=False):
-        raise ValueError(
-            "No face was detected in avatar.jpg. Use a clear, front-facing portrait."
-        )
-    return loaded
 
 
-def _enable_tensorrt_warping(loaded: Any) -> None:
-    """Swap warping_spade's ORT session for a TensorRT FP16 one if possible.
-
-    The model's inputs and outputs are unchanged, so FLP's predictor keeps
-    working; any failure leaves the CUDA session in place.
-    """
-    global warping_backend
-    warping_backend = "cuda"
-    if not AVATAR_TENSORRT:
-        return
-    if "TensorrtExecutionProvider" not in ort.get_available_providers():
-        LOG.warning("AVATAR_TENSORRT is set but ONNX Runtime has no TensorRT provider")
-        return
-    model = loaded.model_dict["warping_spade"]
-    model_path = model.kwargs["model_path"]
-    Path(TENSORRT_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-    options = {
-        "trt_fp16_enable": True,
-        "trt_engine_cache_enable": True,
-        "trt_engine_cache_path": TENSORRT_CACHE_DIR,
-    }
-    started = time.perf_counter()
-    try:
-        session = ort.InferenceSession(
-            model_path,
-            providers=[("TensorrtExecutionProvider", options), "CUDAExecutionProvider"],
-        )
-        # Build (or load) the engines now rather than on the first request.
-        session.run(
-            None,
-            {
-                item.name: np.zeros(item.shape, dtype=np.float32)
-                for item in session.get_inputs()
-            },
-        )
-    except Exception:
-        LOG.exception("TensorRT warping session failed; keeping the CUDA provider")
-        return
-    model.predictor.onnx_model = session
-    warping_backend = "tensorrt-fp16"
-    LOG.info(
-        "warping_spade uses TensorRT FP16 (ready in %.1fs, cache %s)",
-        time.perf_counter() - started,
-        TENSORRT_CACHE_DIR,
-    )
 
 
 
@@ -368,249 +229,12 @@ async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
 
 
 
-def _ensure_joyvasa_pipeline() -> None:
-    """Create JoyVASA exactly as FLP's run_audio_driving does."""
-    if pipeline is None:
-        raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
-    if pipeline.joyvasa_pipe is not None:
-        return
-
-    pipeline.joyvasa_pipe = JoyVASAAudio2MotionPipeline(
-        motion_model_path=pipeline.cfg.joyvasa_models.motion_model_path,
-        audio_model_path=pipeline.cfg.joyvasa_models.audio_model_path,
-        motion_template_path=pipeline.cfg.joyvasa_models.motion_template_path,
-        cfg_mode=pipeline.cfg.infer_params.cfg_mode,
-        cfg_scale=pipeline.cfg.infer_params.cfg_scale,
-    )
 
 
-def _adjust_driving_motion(
-    motion: dict[str, Any],
-    reference: dict[str, Any] | None,
-    source_exp: np.ndarray | None = None,
-    eye_scale: float = AVATAR_EYE_MOTION_SCALE,
-    lip_scale: float = AVATAR_LIP_MOTION_SCALE,
-    lip_mode: str = AVATAR_LIP_MOTION_MODE,
-    head_scale: float = AVATAR_HEAD_MOTION_SCALE,
-) -> dict[str, Any]:
-    """Adjust JoyVASA's eyes, mouth and head before FLP applies them.
-
-    With relative motion FLP animates `source + (driving - reference)`.
-    Scaling driving values around the reference scales the change that
-    reaches the portrait; setting mouth keypoints to
-    `driving - source + reference` makes FLP produce JoyVASA's absolute mouth.
-    """
-    absolute_lips = lip_mode == "absolute" and source_exp is not None
-    if (
-        reference is None
-        or not AVATAR_RELATIVE_MOTION
-        or (
-            eye_scale == 1.0
-            and head_scale == 1.0
-            and not absolute_lips
-            and lip_scale == 1.0
-        )
-    ):
-        return motion
-    reference_exp = np.asarray(reference["exp"])
-    exp = np.array(motion["exp"], copy=True)
-    eyes, lips = EYE_EXPRESSION_INDICES, LIP_EXPRESSION_INDICES
-    exp[:, eyes, :] = reference_exp[:, eyes, :] + eye_scale * (
-        exp[:, eyes, :] - reference_exp[:, eyes, :]
-    )
-    if absolute_lips:
-        exp[:, lips, :] = (
-            exp[:, lips, :] - np.asarray(source_exp)[:, lips, :]
-            + reference_exp[:, lips, :]
-        )
-    else:
-        exp[:, lips, :] = reference_exp[:, lips, :] + lip_scale * (
-            exp[:, lips, :] - reference_exp[:, lips, :]
-        )
-    adjusted = {**motion, "exp": exp}
-    if head_scale != 1.0:
-
-        def damp(key: str) -> np.ndarray:
-            return reference[key] + head_scale * (motion[key] - reference[key])
-
-        angles = {key: damp(key) for key in ("pitch", "yaw", "roll")}
-        adjusted.update(angles, t=damp("t"))
-        adjusted["R"] = (
-            get_rotation_matrix(angles["pitch"], angles["yaw"], angles["roll"])
-            .reshape(np.shape(motion["R"]))
-            .astype(np.float32)
-        )
-    return adjusted
 
 
-def _dump_motion(wav_path: Path, motion_info: dict[str, Any]) -> None:
-    dump_dir = Path(DEBUG_DUMP_DIR)
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{time.strftime('%Y%m%dT%H%M%S')}-{time.perf_counter_ns() % 10**6:06d}"
-    shutil.copyfile(wav_path, dump_dir / f"{stem}.wav")
-    motion = motion_info["motion"]
-    np.savez_compressed(
-        dump_dir / f"{stem}.npz",
-        **{key: np.stack([frame[key] for frame in motion]) for key in motion[0]},
-        fps=float(motion_info.get("output_fps") or 25.0),
-    )
 
 
-def _render_animation(
-    wav_path: Path,
-    render_stride: int | None = None,
-    reset_motion_reference: bool = True,
-    window_callback: Any | None = None,
-) -> tuple[list[np.ndarray], float, dict[str, Any]]:
-    """Run JoyVASA and FLP frames in memory, without pickle/video/FFmpeg I/O.
-
-    This deliberately keeps phrase-level batching so render stride can be
-    measured independently. A later step can append frames incrementally.
-    """
-    if pipeline is None:
-        raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
-    if pipeline.is_source_video:
-        raise RuntimeError("Direct-memory rendering currently requires a source image")
-
-    selected_stride = render_stride or RENDER_STRIDE
-    render_started = time.perf_counter()
-    _ensure_joyvasa_pipeline()
-    assert pipeline.joyvasa_pipe is not None
-
-    motion_started = time.perf_counter()
-    motion_info = pipeline.joyvasa_pipe.gen_motion_sequence(str(wav_path))
-    motion_seconds = time.perf_counter() - motion_started
-    if DEBUG_DUMP_DIR:
-        _dump_motion(wav_path, motion_info)
-
-    source_fps = float(motion_info.get("output_fps") or 25.0)
-    playback_fps = source_fps / selected_stride
-    motion_list = motion_info["motion"]
-    eyes_list = motion_info.get("c_eyes_lst", motion_info.get("c_d_eyes_lst"))
-    lips_list = motion_info.get("c_lip_lst", motion_info.get("c_d_lip_lst"))
-
-    frame_loop_started = time.perf_counter()
-    frames: list[np.ndarray] = []
-    window: list[np.ndarray] = []
-    window_index = 0
-    window_started = time.perf_counter()
-    window_times_ms: list[int] = []
-    rendered_count = 0
-    expected_rendered_frames = math.ceil(len(motion_list) / selected_stride)
-    for frame_index in range(0, len(motion_list), selected_stride):
-        motion = motion_list[frame_index]
-        eyes = (
-            eyes_list[frame_index]
-            if eyes_list is not None and frame_index < len(eyes_list)
-            else None
-        )
-        lips = (
-            lips_list[frame_index]
-            if lips_list is not None and frame_index < len(lips_list)
-            else None
-        )
-        first_frame = reset_motion_reference and frame_index == 0
-        # The first frame becomes FLP's reference itself, so it is unscaled.
-        motion = _adjust_driving_motion(
-            motion,
-            None
-            if first_frame or pipeline.R_d_0 is None
-            else pipeline.x_d_0_info,
-            # src_infos[face][0] is FLP's x_s_info for the source portrait.
-            pipeline.src_infos[0][0][0]["exp"],
-        )
-        output = pipeline.run_with_pkl(
-            [motion, eyes, lips],
-            pipeline.src_imgs[0],
-            pipeline.src_infos[0],
-            # FasterLivePortrait stores the initial driving rotation and motion
-            # reference on first_frame. Reset once per user utterance, not once
-            # per phrase, so later chunks remain in the same motion space.
-            first_frame=first_frame,
-        )
-        out_crop = output[0]
-        if out_crop is None:
-            LOG.warning("Direct renderer returned no face for frame %d", frame_index)
-            continue
-        frame = _letterbox(cv2.cvtColor(out_crop, cv2.COLOR_RGB2BGR))
-        rendered_count += 1
-        if window_callback is None:
-            frames.append(frame)
-        else:
-            window.append(frame)
-            if len(window) >= RENDER_WINDOW_FRAMES:
-                window_index += 1
-                window_ms = round((time.perf_counter() - window_started) * 1000)
-                window_times_ms.append(window_ms)
-                window_callback(
-                    window,
-                    playback_fps,
-                    {
-                        "index": window_index,
-                        "render_ms": window_ms,
-                        "expected_rendered_frames": expected_rendered_frames,
-                        "motion_frames": len(motion_list),
-                    },
-                )
-                window = []
-                window_started = time.perf_counter()
-
-    if window_callback is not None and window:
-        window_index += 1
-        window_ms = round((time.perf_counter() - window_started) * 1000)
-        window_times_ms.append(window_ms)
-        window_callback(
-            window,
-            playback_fps,
-            {
-                "index": window_index,
-                "render_ms": window_ms,
-                "expected_rendered_frames": expected_rendered_frames,
-                "motion_frames": len(motion_list),
-            },
-        )
-
-    frame_loop_seconds = time.perf_counter() - frame_loop_started
-    total_seconds = time.perf_counter() - render_started
-    return frames, playback_fps, {
-        "backend": "direct-memory",
-        "motion_ms": round(motion_seconds * 1000),
-        "frame_loop_ms": round(frame_loop_seconds * 1000),
-        "pipeline_ms": round(total_seconds * 1000),
-        "decode_ms": 0,
-        "total_ms": round(total_seconds * 1000),
-        "pipeline_reported_ms": 0,
-        "render_stride": selected_stride,
-        "motion_frames": len(motion_list),
-        "frames": rendered_count,
-        "source_fps": round(source_fps, 3),
-        "playback_fps": round(playback_fps, 3),
-        "effective_fps": round(
-            rendered_count / frame_loop_seconds if frame_loop_seconds > 0 else 0.0,
-            3,
-        ),
-        "motion_reference_reset": reset_motion_reference,
-        "persistent_phrase_motion": PERSISTENT_PHRASE_MOTION,
-        "relative_motion": AVATAR_RELATIVE_MOTION,
-        "animation_region": AVATAR_ANIMATION_REGION,
-        "driving_multiplier": AVATAR_DRIVING_MULTIPLIER,
-        "normalize_lip": AVATAR_NORMALIZE_LIP,
-        "eye_retargeting": AVATAR_EYE_RETARGETING,
-        "eye_motion_scale": AVATAR_EYE_MOTION_SCALE,
-        "lip_motion_scale": AVATAR_LIP_MOTION_SCALE,
-        "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
-        "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
-        "lip_retargeting": AVATAR_LIP_RETARGETING,
-        "incremental_windows": window_callback is not None,
-        "window_size": RENDER_WINDOW_FRAMES if window_callback is not None else 0,
-        "window_count": window_index,
-        "window_max_ms": max(window_times_ms, default=0),
-        "window_mean_ms": round(
-            sum(window_times_ms) / len(window_times_ms)
-            if window_times_ms
-            else 0
-        ),
-    }
 
 
 def _select_render_stride(
@@ -661,7 +285,7 @@ async def _render_phrase_in_windows(
 
     render_task = asyncio.create_task(
         asyncio.to_thread(
-            _render_animation,
+            RENDERER.render,
             wav_path,
             selected_stride,
             reset_motion_reference,
@@ -690,7 +314,7 @@ async def _render_phrase_in_windows(
                     fps,
                     window_detail["expected_rendered_frames"],
                     render_rate=(
-                        render_fps_estimate / fps if SPEECH_START_GATE else None
+                        RENDERER.fps_estimate / fps if SPEECH_START_GATE else None
                     ),
                     window_seconds=RENDER_WINDOW_FRAMES / fps,
                 )
@@ -798,7 +422,6 @@ async def _create_clip(
     playback: PlaybackBuffer,
     channel: Any,
 ) -> None:
-    global render_fps_estimate
     if startup_error:
         await _send_event(channel, "error", message=startup_error)
         return
@@ -949,7 +572,7 @@ async def _create_clip(
                         )
                     else:
                         frames, fps, render_detail = await asyncio.to_thread(
-                            _render_animation,
+                            RENDERER.render,
                             wav_path,
                             selected_stride,
                             index == 1 or not PERSISTENT_PHRASE_MOTION,
@@ -981,11 +604,7 @@ async def _create_clip(
                     )
                     render_seconds = time.perf_counter() - started
                     total_render += render_seconds
-                    if render_detail.get("effective_fps", 0) > 0:
-                        render_fps_estimate = (
-                            0.5 * render_fps_estimate
-                            + 0.5 * render_detail["effective_fps"]
-                        )
+                    RENDERER.measured(render_detail.get("effective_fps", 0))
                     underrun_ms = (
                         playback.audio_underruns - underruns_before
                     ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
@@ -1133,7 +752,7 @@ async def _create_clip(
                         video_dropped_ms=round(video_dropped_ms),
                         speech_hold_ms=round(speech_hold_ms),
                         speech_lead_ms=round(playback.speech_lead_seconds * 1000),
-                        render_fps_estimate=round(render_fps_estimate, 3),
+                        render_fps_estimate=round(RENDERER.fps_estimate, 3),
                         first_ready_ms=first_ready_ms,
                     )
 
@@ -1199,7 +818,6 @@ async def _warmup_pipeline() -> None:
     """Exercise the same TTS, JoyVASA and renderer path before the first user."""
     global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
     global tts_startup_wait_seconds
-    global render_fps_estimate
 
     started = time.perf_counter()
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1226,7 +844,7 @@ async def _warmup_pipeline() -> None:
                 wav_path,
             )
             frames, fps, render_detail = await asyncio.to_thread(
-                _render_animation,
+                RENDERER.render,
                 wav_path,
             )
             if USE_NEURAL_IDLE_FRAME:
@@ -1262,12 +880,7 @@ async def _warmup_pipeline() -> None:
                     3,
                 ),
             }
-            # A cold CUDA warm-up under-reports speed, so it may only raise the
-            # estimate: with TensorRT it removes the first phrase's needless
-            # wait for the assumed EXPECTED_RENDER_FPS.
-            render_fps_estimate = max(
-                render_fps_estimate, render_detail.get("effective_fps", 0.0)
-            )
+            RENDERER.measured_at_warmup(render_detail.get("effective_fps", 0.0))
             warmup_complete = True
             LOG.info(
                 "Startup warm-up complete: total=%.3fs tts=%dms pipeline=%dms "
@@ -1289,11 +902,11 @@ async def _warmup_pipeline() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global pipeline, startup_error
+    global startup_error
     try:
-        IDLE_FRAME.frame = _load_avatar()
+        IDLE_FRAME.frame = load_avatar(Path(SETTINGS.image_path))
         LOG.info("Loading FasterLivePortrait and source portrait")
-        pipeline = await asyncio.to_thread(_initialize_pipeline)
+        await asyncio.to_thread(RENDERER.load)
         await _warmup_pipeline()
         LOG.info("Avatar pipeline is ready")
     except Exception as exc:
@@ -1373,10 +986,10 @@ async def health() -> JSONResponse:
         "listener_enabled": bool(LISTENER_SOCKET),
         "conductor_enabled": bool(CONDUCTOR_SOCKET),
         "crop_rotation": AVATAR_CROP_ROTATION,
-        "warping_backend": warping_backend,
+        "warping_backend": RENDERER.warping_backend,
         "speech_start_gate": SPEECH_START_GATE,
         "speech_start_safety": SPEECH_START_SAFETY,
-        "render_fps_estimate": round(render_fps_estimate, 3),
+        "render_fps_estimate": round(RENDERER.fps_estimate, 3),
         "lip_retargeting": AVATAR_LIP_RETARGETING,
         "default_voice_mode": TTS_DEFAULT_VOICE_MODE,
         "voice_modes": sorted(VOICE_MODES),

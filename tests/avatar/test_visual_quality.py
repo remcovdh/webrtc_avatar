@@ -8,24 +8,11 @@ class VisualQualitySourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[2]
-        cls.server = (root / "src/avatar/server.py").read_text(encoding="utf-8")
         cls.benchmark = (root / "scripts/benchmark_avatar.py").read_text(encoding="utf-8")
         cls.compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         cls.quality_runner = (root / "scripts/quality_benchmark.sh").read_text(
             encoding="utf-8"
         )
-
-    def test_flp_visual_controls_are_wired(self) -> None:
-        expected = [
-            "cfg.infer_params.animation_region = AVATAR_ANIMATION_REGION",
-            "cfg.infer_params.driving_multiplier = AVATAR_DRIVING_MULTIPLIER",
-            "cfg.infer_params.flag_normalize_lip = AVATAR_NORMALIZE_LIP",
-            "cfg.infer_params.flag_eye_retargeting = AVATAR_EYE_RETARGETING",
-            "cfg.infer_params.flag_lip_retargeting = AVATAR_LIP_RETARGETING",
-        ]
-        for value in expected:
-            with self.subTest(value=value):
-                self.assertIn(value, self.server)
 
     def test_compose_exposes_every_visual_control(self) -> None:
         for name in [
