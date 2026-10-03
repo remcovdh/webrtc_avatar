@@ -28,6 +28,7 @@ from typing import Callable, Iterator
 
 import numpy as np
 
+from shared.models import split_revision
 from shared.listener_protocol import (
     AUDIO,
     CONTROL,
@@ -41,8 +42,15 @@ from shared.listener_protocol import (
 LOG = logging.getLogger("listener")
 
 SOCKET_PATH = os.getenv("LISTENER_SOCKET", "/run/avatar/listener.sock")
-ASR_MODEL = os.getenv("LISTENER_ASR_MODEL", "nvidia/nemotron-3.5-asr-streaming-0.6b")
-DIAR_MODEL = os.getenv("LISTENER_DIAR_MODEL", "nvidia/Nemotron-3-Diarization")
+# "<huggingface repo>[@<revision>]" for both models.
+ASR_MODEL = os.getenv(
+    "LISTENER_ASR_MODEL",
+    "nvidia/nemotron-3.5-asr-streaming-0.6b@ea30d66debe3740a08b573244286791d423d6b3e",
+)
+DIAR_MODEL = os.getenv(
+    "LISTENER_DIAR_MODEL",
+    "nvidia/Nemotron-3-Diarization@f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+)
 # Right attention context of the streaming ASR: 0/3/6/13 = 80/320/560/1120 ms.
 ASR_LOOKAHEAD = int(os.getenv("LISTENER_ASR_LOOKAHEAD", "3"))
 # Expected language until the page chooses one. Automatic detection mixed
@@ -179,20 +187,26 @@ class Models:
         started = time.perf_counter()
         self.torch = torch
         self.vad = load_silero_vad()
-        self.asr_processor = AutoProcessor.from_pretrained(ASR_MODEL)
+        asr_repo, asr_revision = split_revision(ASR_MODEL)
+        diar_repo, diar_revision = split_revision(DIAR_MODEL)
+        self.asr_processor = AutoProcessor.from_pretrained(asr_repo, revision=asr_revision)
         self.asr_processor.set_num_lookahead_tokens(ASR_LOOKAHEAD)
         self.asr = (
-            AutoModelForRNNT.from_pretrained(ASR_MODEL, dtype=torch.bfloat16)
+            AutoModelForRNNT.from_pretrained(
+                asr_repo, revision=asr_revision, dtype=torch.bfloat16
+            )
             .to("cuda")
             .eval()
         )
         sub = self.asr.config.encoder_config.subsampling_factor
         self.asr_first_frames = 1 + sub * ASR_LOOKAHEAD
         self.asr_per_frames = sub * (ASR_LOOKAHEAD + 1)
-        self.diar_processor = AutoProcessor.from_pretrained(DIAR_MODEL)
+        self.diar_processor = AutoProcessor.from_pretrained(diar_repo, revision=diar_revision)
         self.diar_processor.set_streaming_mode(DIAR_MODE)
         self.diar = (
-            AutoModelForAudioFrameClassification.from_pretrained(DIAR_MODEL)
+            AutoModelForAudioFrameClassification.from_pretrained(
+                diar_repo, revision=diar_revision
+            )
             .to("cuda")
             .eval()
         )

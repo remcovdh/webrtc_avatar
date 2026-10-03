@@ -31,7 +31,8 @@ CONFIG_PATH = Path(os.getenv("SYSTEM1_CONFIG", "/workspace/config/system1.json")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "/workspace/knowledge"))
 REVIEW_MODEL = os.getenv(
     "REVIEW_MODEL",
-    "unsloth/Qwen3-4B-Instruct-2507-GGUF::Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946bb6b655725eafa393f4a9745d460374c9"
+    "::Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
 )
 UNSURE_BELOW = float(os.getenv("REVIEW_UNSURE_BELOW", "0.6"))
 REPEAT_SIMILARITY = float(os.getenv("REVIEW_REPEAT_SIMILARITY", "0.88"))
@@ -159,11 +160,11 @@ class ReviewModel:
     def __init__(self, model: str = REVIEW_MODEL, llm: Any = None) -> None:
         if llm is None:
             import torch  # noqa: F401  (load before llama.cpp, see system1.JevK5Decider)
-            from huggingface_hub import hf_hub_download
             from llama_cpp import Llama
 
-            repo, filename = model.split("::")
-            llm = Llama(model_path=hf_hub_download(repo, filename), n_gpu_layers=-1, n_ctx=8192, verbose=False)
+            from shared.models import download_gguf
+
+            llm = Llama(model_path=download_gguf(model), n_gpu_layers=-1, n_ctx=8192, verbose=False)
         self.llm = llm
 
     def ask(self, instructions: str, material: Any) -> Any:

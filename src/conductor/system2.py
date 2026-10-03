@@ -16,16 +16,21 @@ import time
 from typing import Any, Protocol, Sequence
 
 from conductor.knowledge import Passage
+from shared.models import download_gguf
 
 LOG = logging.getLogger("system2")
 
-# "<huggingface repo>::<gguf file>". Chosen by measurement (see
-# docs/architecture/listening.md): Llama 3.2 3B answered fastest (median 260 ms), shortest
-# and always in English; Qwen3 4B was richer but too long for speech; Phi-4-mini
-# answered Dutch questions in Dutch.
+# "<huggingface repo>[@<revision>]::<gguf file>". Chosen by measurement with
+# tools/eval_system2.py (see docs/architecture/listening.md): IBM Granite 4.0
+# 1B (Apache-2.0) answered every Dutch and English test question in English,
+# stayed with the notes, and was the fastest and smallest (median ~110 ms,
+# 1.5 GB of GPU memory). It replaced Llama 3.2 3B (~260 ms, 2.9 GB, Llama
+# Community License). Qwen3.5 2B was as faithful but wordier; Qwen3.5 0.8B
+# invented facts.
 MODEL = os.getenv(
     "SYSTEM2_MODEL",
-    "bartowski/Llama-3.2-3B-Instruct-GGUF::Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+    "ibm-granite/granite-4.0-1b-GGUF@b27c2fe3f211b7f44e80fa620177aea371099aaa"
+    "::granite-4.0-1b-Q4_K_M.gguf",
 )
 MAX_TOKENS = int(os.getenv("SYSTEM2_MAX_TOKENS", "120"))
 
@@ -39,6 +44,12 @@ Rules:
 The question may be in Dutch; still answer in English."""
 
 
+REMINDER = (
+    "(Answer in English, using only the notes. If the notes do not contain the "
+    "answer, say you don't know that yet.)"
+)
+
+
 class System2(Protocol):
     def answer(self, question: str, passages: Sequence[Passage]) -> tuple[str, dict[str, Any]]:
         """The spoken answer and details (model, timings) for the log."""
@@ -49,7 +60,13 @@ def build_messages(question: str, passages: Sequence[Passage]) -> list[dict[str,
     notes = "\n\n".join(f"[{i + 1}] {p.text}" for i, p in enumerate(passages))
     return [
         {"role": "system", "content": INSTRUCTIONS},
-        {"role": "user", "content": f"Notes:\n{notes}\n\nQuestion: {question}"},
+        {
+            "role": "user",
+            # Small models follow the instruction they read last: without this
+            # reminder they answered Dutch questions in Dutch and guessed when
+            # the notes had no answer.
+            "content": f"Notes:\n{notes}\n\nQuestion: {question} {REMINDER}",
+        },
     ]
 
 
@@ -70,14 +87,14 @@ class LlamaSystem2:
         self.model = model
         if llm is None:
             import torch  # noqa: F401  (load before llama.cpp, see system1.JevK5Decider)
-            from huggingface_hub import hf_hub_download
             from llama_cpp import Llama
 
-            repo, filename = model.split("::")
             started = time.perf_counter()
-            path = hf_hub_download(repo, filename)
-            llm = Llama(model_path=path, n_gpu_layers=-1, n_ctx=4096, verbose=False)
-            LOG.info("System 2 model %s ready in %.1fs", filename, time.perf_counter() - started)
+            llm = Llama(model_path=download_gguf(model), n_gpu_layers=-1, n_ctx=4096, verbose=False)
+            LOG.info(
+                "System 2 model %s ready in %.1fs",
+                model.split("::")[-1], time.perf_counter() - started,
+            )
         self.llm = llm
 
     def warm_up(self) -> None:

@@ -67,6 +67,11 @@ class System2Tests(unittest.TestCase):
         messages = build_messages("Waarom?", [Passage("Fact one", "a", 0.9), Passage("Fact two", "b", 0.8)])
         self.assertIn("[1] Fact one", messages[1]["content"])
         self.assertIn("Question: Waarom?", messages[1]["content"])
+        # The reminder is the last thing the model reads.
+        self.assertTrue(messages[1]["content"].endswith(
+            "(Answer in English, using only the notes. If the notes do not contain "
+            "the answer, say you don't know that yet.)"
+        ))
         self.assertIn("ONLY the facts", messages[0]["content"])
 
 

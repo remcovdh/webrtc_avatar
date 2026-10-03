@@ -34,9 +34,11 @@ LOG = logging.getLogger("system1")
 
 CONFIG_PATH = Path(os.getenv("SYSTEM1_CONFIG", "/workspace/config/system1.json"))
 MEMORY_PATH = Path(os.getenv("SYSTEM1_MEMORY", "/workspace/results/system1/corrections.jsonl"))
-# "<huggingface repo>::<gguf file>" of the JevK5 decision model.
+# "<huggingface repo>[@<revision>]::<gguf file>" of the JevK5 decision model.
 JEVK5_MODEL = os.getenv(
-    "SYSTEM1_MODEL", "alibiserikbay/JevK5-GGUF::jevk5-4b-v0.3-Q4_K_M.gguf"
+    "SYSTEM1_MODEL",
+    "alibiserikbay/JevK5-GGUF@ec67b0bfce5119a8b11a2cdb430bb43e3fa3e82a"
+    "::jevk5-4b-v0.3-Q4_K_M.gguf",
 )
 # Softmax temperature of the option-logit readout (JevK5 v0.3's jevk5_config.json).
 JEVK5_TEMPERATURE = 1.22
@@ -261,15 +263,16 @@ class JevK5Decider:
             # other order fails later with "libtorch_cuda.so: undefined symbol:
             # ncclCommWindowRegister" when the embeddings import torch.
             import torch  # noqa: F401
-            from huggingface_hub import hf_hub_download
             from llama_cpp import Llama
 
-            repo, filename = model.split("::")
+            from shared.models import download_gguf
+
+            filename = model.split("::")[-1]
             started = time.perf_counter()
             # logits_all keeps the last position's logits readable; a small
             # context keeps that buffer small (prompts are a few hundred tokens).
             llm = Llama(
-                model_path=hf_hub_download(repo, filename),
+                model_path=download_gguf(model),
                 n_gpu_layers=-1, n_ctx=1024, logits_all=True, verbose=False,
             )
             LOG.info("JevK5 %s loaded in %.1fs", filename, time.perf_counter() - started)

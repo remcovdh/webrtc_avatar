@@ -19,10 +19,16 @@ from typing import Any, Callable, Protocol, Sequence
 
 import numpy as np
 
+from shared.models import split_revision
+
 LOG = logging.getLogger("knowledge")
 
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "/workspace/knowledge"))
-EMBED_MODEL = os.getenv("KNOWLEDGE_EMBED_MODEL", "intfloat/multilingual-e5-small")
+# "<huggingface repo>[@<revision>]".
+EMBED_MODEL = os.getenv(
+    "KNOWLEDGE_EMBED_MODEL",
+    "intfloat/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
+)
 MAX_SECTION_CHARS = 700
 
 
@@ -86,7 +92,8 @@ def load_embedder() -> Callable[[Sequence[str], bool], np.ndarray]:
         from sentence_transformers import SentenceTransformer
 
         started = time.perf_counter()
-        model = SentenceTransformer(EMBED_MODEL, device="cpu")
+        repo, revision = split_revision(EMBED_MODEL)
+        model = SentenceTransformer(repo, revision=revision, device="cpu")
         LOG.info("Embedding model %s loaded in %.1fs", EMBED_MODEL, time.perf_counter() - started)
 
         def embed(texts: Sequence[str], is_query: bool) -> np.ndarray:
