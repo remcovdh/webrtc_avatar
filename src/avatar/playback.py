@@ -70,6 +70,19 @@ class PlaybackBuffer:
     def playhead_seconds(self) -> float:
         return self._audio_played_samples / AUDIO_RATE
 
+    def counters_ms(self) -> dict[str, float]:
+        """What went wrong so far, in milliseconds of media: audio that was due
+        but not there, video that was due but not there, video skipped because
+        its moment had passed, and speech deliberately held for the video."""
+        chunk_ms = AUDIO_SAMPLES / AUDIO_RATE * 1000
+        frame_ms = 1000 / VIDEO_FPS
+        return {
+            "underrun_ms": self.audio_underruns * chunk_ms,
+            "video_underrun_ms": self.video_underruns * frame_ms,
+            "video_dropped_ms": self.video_dropped * frame_ms,
+            "speech_hold_ms": self.speech_holds * chunk_ms,
+        }
+
     def begin(self) -> None:
         self.clear()
         self.producing = True

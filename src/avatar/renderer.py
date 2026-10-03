@@ -439,13 +439,10 @@ class Renderer:
         frame_loop_seconds = time.perf_counter() - frame_loop_started
         total_seconds = time.perf_counter() - render_started
         return frames, playback_fps, {
-            "backend": "direct-memory",
             "motion_ms": round(motion_seconds * 1000),
             "frame_loop_ms": round(frame_loop_seconds * 1000),
             "pipeline_ms": round(total_seconds * 1000),
-            "decode_ms": 0,
             "total_ms": round(total_seconds * 1000),
-            "pipeline_reported_ms": 0,
             "render_stride": selected_stride,
             "motion_frames": len(motion_list),
             "frames": rendered_count,

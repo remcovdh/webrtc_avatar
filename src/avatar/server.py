@@ -51,6 +51,7 @@ from avatar.conductor_client import ConductorClient
 from avatar.phrases import split_phrases
 from avatar.renderer import Renderer, load_avatar
 from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
+from avatar.speech import Speaker, send_event
 from avatar.tracks import AvatarAudioTrack, AvatarVideoTrack
 from avatar.tts_client import PROVIDER as TTS_PROVIDER
 from avatar.tts_client import (
@@ -179,12 +180,6 @@ PHRASE_MAX_CHARS = SETTINGS.phrase_max_chars
 
 pcs: set[RTCPeerConnection] = set()
 startup_error: str | None = None
-inference_lock = asyncio.Lock()
-warmup_complete = False
-warmup_seconds: float | None = None
-warmup_metrics: dict[str, Any] = {}
-warmup_error: str | None = None
-tts_startup_wait_seconds: float | None = None
 
 
 
@@ -202,6 +197,7 @@ tts_startup_wait_seconds: float | None = None
 
 # The image shown while idle; every playback buffer reads it.
 IDLE_FRAME = IdleFrame()
+SPEAKER = Speaker(SETTINGS, RENDERER, TTS, IDLE_FRAME)
 
 
 
@@ -222,9 +218,6 @@ IDLE_FRAME = IdleFrame()
 
 
 
-async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
-    if getattr(channel, "readyState", None) == "open":
-        channel.send(json.dumps({"type": event_type, **payload}))
 
 
 
@@ -237,667 +230,16 @@ async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
 
 
 
-def _select_render_stride(
-    phrase_index: int,
-    buffered_seconds: float,
-) -> tuple[int, str]:
-    """Select temporal quality from the buffer state at render start."""
-    if not ADAPTIVE_RENDER_STRIDE or CATCHUP_RENDER_STRIDE == RENDER_STRIDE:
-        return RENDER_STRIDE, "fixed"
-    if phrase_index == 1:
-        return RENDER_STRIDE, "first-phrase-quality"
-    if buffered_seconds < CATCHUP_BUFFER_SECONDS:
-        return CATCHUP_RENDER_STRIDE, "low-buffer-catchup"
-    return RENDER_STRIDE, "buffer-healthy"
 
 
-async def _render_phrase_in_windows(
-    wav_path: Path,
-    selected_stride: int,
-    reset_motion_reference: bool,
-    pcm: np.ndarray,
-    playback: PlaybackBuffer,
-    channel: Any,
-    phrase_index: int,
-    phrase_count: int,
-    request_started: float,
-    prefetch_callback: Any | None = None,
-    prefetch_min_buffer_seconds: float = 0.0,
-) -> tuple[float, dict[str, Any], int]:
-    """Render on a worker thread and publish completed windows on the event loop."""
-    loop = asyncio.get_running_loop()
-    windows: asyncio.Queue[tuple[list[np.ndarray], float, dict[str, Any]]] = (
-        asyncio.Queue()
-    )
-    render_started = time.perf_counter()
-
-    def publish_window(
-        frames: list[np.ndarray],
-        fps: float,
-        detail: dict[str, Any],
-    ) -> None:
-        # Block the worker only until ownership of this small window has moved
-        # to the event loop. GPU rendering resumes while WebRTC consumes it.
-        asyncio.run_coroutine_threadsafe(
-            windows.put((frames, fps, detail)),
-            loop,
-        ).result()
-
-    render_task = asyncio.create_task(
-        asyncio.to_thread(
-            RENDERER.render,
-            wav_path,
-            selected_stride,
-            reset_motion_reference,
-            publish_window,
-        )
-    )
-    media_duration: float | None = None
-    first_window_ms: int | None = None
-    published_windows = 0
-    deferred_prefetch_started = False
-    deferred_prefetch_buffer_seconds: float | None = None
-
-    try:
-        while not render_task.done() or not windows.empty():
-            try:
-                frames, fps, window_detail = await asyncio.wait_for(
-                    windows.get(),
-                    timeout=0.05,
-                )
-            except TimeoutError:
-                continue
-
-            if media_duration is None:
-                media_duration = playback.begin_phrase_stream(
-                    pcm,
-                    fps,
-                    window_detail["expected_rendered_frames"],
-                    render_rate=(
-                        RENDERER.fps_estimate / fps if SPEECH_START_GATE else None
-                    ),
-                    window_seconds=RENDER_WINDOW_FRAMES / fps,
-                )
-                first_window_ms = round(
-                    (time.perf_counter() - render_started) * 1000
-                )
-                playback.append_video_window(frames)
-                published_windows += 1
-                await _send_event(
-                    channel,
-                    "playing",
-                    message=(
-                        f"Playing phrase {phrase_index}/{phrase_count} after "
-                        f"the first {len(frames)}-frame window…"
-                    ),
-                    duration=round(media_duration, 3),
-                    first_window_ms=first_window_ms,
-                    first_ready_ms=round(
-                        (time.perf_counter() - request_started) * 1000
-                    ),
-                )
-            else:
-                playback.append_video_window(frames)
-                published_windows += 1
-
-            # Adaptive prefetch is deliberately evaluated only after at least
-            # one video window has been published. This protects first-frame
-            # latency from shared-GPU TTS contention and avoids starting work
-            # when the playable A/V buffer is already too shallow.
-            if (
-                prefetch_callback is not None
-                and not deferred_prefetch_started
-                and playback.buffered_seconds >= prefetch_min_buffer_seconds
-            ):
-                deferred_prefetch_buffer_seconds = playback.buffered_seconds
-                deferred_prefetch_started = bool(prefetch_callback())
-
-        _unused_frames, _fps, render_detail = await render_task
-    except Exception:
-        if not render_task.done():
-            render_task.cancel()
-        await asyncio.gather(render_task, return_exceptions=True)
-        raise
-
-    if media_duration is None or first_window_ms is None or published_windows == 0:
-        raise RuntimeError("Incremental FLP rendering returned no frame windows")
-    playback.finish_phrase_stream()
-    render_detail["first_window_ms"] = first_window_ms
-    render_detail["published_windows"] = published_windows
-    render_detail["deferred_prefetch_started"] = deferred_prefetch_started
-    render_detail["deferred_prefetch_buffer_seconds"] = (
-        round(deferred_prefetch_buffer_seconds, 3)
-        if deferred_prefetch_buffer_seconds is not None
-        else None
-    )
-    return media_duration, render_detail, first_window_ms
-
-
-async def _prepare_phrase_audio(
-    phrase: str,
-    voice: VoiceRequest,
-    tmp_dir: Path,
-    index: int,
-    phrase_count: int,
-    channel: Any,
-    prefetched: bool,
-) -> dict[str, Any]:
-    """Synthesize one phrase in its own directory and retain timing metadata."""
-    chunk_dir = tmp_dir / f"chunk-{index:03d}"
-    chunk_dir.mkdir(exist_ok=True)
-    pcm_path = chunk_dir / "speech.pcm"
-    wav_path = chunk_dir / "speech.wav"
-    await _send_event(
-        channel,
-        "status",
-        phase="tts-prefetch" if prefetched else "tts",
-        chunk=index,
-        chunks=phrase_count,
-        message=(
-            f"Phrase {index}/{phrase_count}: pre-generating speech during render…"
-            if prefetched
-            else f"Phrase {index}/{phrase_count}: generating speech…"
-        ),
-    )
-    started = time.perf_counter()
-    pcm, detail = await TTS.synthesize(
-        phrase,
-        voice,
-        pcm_path,
-        wav_path,
-    )
-    completed = time.perf_counter()
-    return {
-        "wav_path": wav_path,
-        "pcm": pcm,
-        "detail": detail,
-        "seconds": completed - started,
-        "prefetched": prefetched,
-    }
-
-
-async def _create_clip(
-    text: str,
-    voice_mode: str,
-    playback: PlaybackBuffer,
-    channel: Any,
-) -> None:
-    if startup_error:
-        await _send_event(channel, "error", message=startup_error)
-        return
-    if playback.busy:
-        await _send_event(channel, "error", message="Wait for the current speech to finish.")
-        return
-
-    phrases = split_phrases(text, SETTINGS)
-    if not phrases:
-        await _send_event(channel, "error", message="Enter text to speak.")
-        return
-
-    try:
-        voice = TTS.resolve_voice(voice_mode)
-    except ValueError as exc:
-        await _send_event(channel, "error", message=str(exc))
-        return
-
-    playback.begin()
-    request_started = time.perf_counter()
-    total_tts = 0.0
-    total_render = 0.0
-    tts_task: asyncio.Task[dict[str, Any]] | None = None
-
-    await _send_event(
-        channel,
-        "plan",
-        message=(
-            f"Prepared {len(phrases)} progressive phrase"
-            f"{'s' if len(phrases) != 1 else ''} with {voice.mode} voice"
-        ),
-        phrases=phrases,
-        voice_mode=voice.mode,
-        tts_provider=TTS_PROVIDER,
-    )
-
-    if inference_lock.locked():
-        await _send_event(channel, "status", phase="queued", message="Queued behind another request…")
-
-    try:
-        async with inference_lock:
-            RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="avatar-", dir=RESULTS_ROOT) as tmp:
-                tmp_dir = Path(tmp)
-                for index, phrase in enumerate(phrases, start=1):
-                    underruns_before = playback.audio_underruns
-                    video_underruns_before = playback.video_underruns
-                    video_dropped_before = playback.video_dropped
-                    speech_holds_before = playback.speech_holds
-
-                    if tts_task is None:
-                        tts_task = asyncio.create_task(
-                            _prepare_phrase_audio(
-                                phrase,
-                                voice,
-                                tmp_dir,
-                                index,
-                                len(phrases),
-                                channel,
-                                prefetched=False,
-                            )
-                        )
-                    current_tts_task = tts_task
-                    tts_task = None
-                    tts_wait_started = time.perf_counter()
-                    audio_result = await current_tts_task
-                    tts_wait_seconds = time.perf_counter() - tts_wait_started
-                    wav_path = audio_result["wav_path"]
-                    pcm = audio_result["pcm"]
-                    tts_detail = audio_result["detail"]
-                    tts_seconds = audio_result["seconds"]
-                    tts_wait_ms = round(tts_wait_seconds * 1000)
-                    tts_overlap_ms = max(0, round(tts_seconds * 1000) - tts_wait_ms)
-                    total_tts += tts_seconds
-
-                    await _send_event(
-                        channel,
-                        "status",
-                        phase="animation",
-                        chunk=index,
-                        chunks=len(phrases),
-                        message=f"Phrase {index}/{len(phrases)}: rendering facial motion…",
-                    )
-                    next_prefetch_started = False
-                    next_prefetch_buffer_seconds: float | None = None
-
-                    def start_next_prefetch() -> bool:
-                        nonlocal tts_task
-                        nonlocal next_prefetch_started
-                        nonlocal next_prefetch_buffer_seconds
-                        if (
-                            not TTS_PREFETCH
-                            or index >= len(phrases)
-                            or tts_task is not None
-                        ):
-                            return False
-                        next_prefetch_buffer_seconds = playback.buffered_seconds
-                        tts_task = asyncio.create_task(
-                            _prepare_phrase_audio(
-                                phrases[index],
-                                voice,
-                                tmp_dir,
-                                index + 1,
-                                len(phrases),
-                                channel,
-                                prefetched=True,
-                            )
-                        )
-                        next_prefetch_started = True
-                        return True
-
-                    if TTS_PREFETCH and TTS_PREFETCH_POLICY == "eager":
-                        start_next_prefetch()
-                    buffer_before_render = playback.buffered_seconds
-                    selected_stride, stride_reason = _select_render_stride(
-                        index,
-                        buffer_before_render,
-                    )
-                    started = time.perf_counter()
-                    incremental = INCREMENTAL_FRAME_WINDOWS
-                    if incremental:
-                        media_duration, render_detail, first_window_ms = (
-                            await _render_phrase_in_windows(
-                                wav_path,
-                                selected_stride,
-                                index == 1 or not PERSISTENT_PHRASE_MOTION,
-                                pcm,
-                                playback,
-                                channel,
-                                index,
-                                len(phrases),
-                                request_started,
-                                (
-                                    start_next_prefetch
-                                    if TTS_PREFETCH
-                                    and TTS_PREFETCH_POLICY == "adaptive"
-                                    and index < len(phrases)
-                                    else None
-                                ),
-                                TTS_PREFETCH_MIN_BUFFER_SECONDS,
-                            )
-                        )
-                        first_ready_ms = (
-                            round((started - request_started) * 1000)
-                            + first_window_ms
-                            if index == 1
-                            else None
-                        )
-                    else:
-                        frames, fps, render_detail = await asyncio.to_thread(
-                            RENDERER.render,
-                            wav_path,
-                            selected_stride,
-                            index == 1 or not PERSISTENT_PHRASE_MOTION,
-                        )
-                        media_duration = playback.append(frames, fps, pcm)
-                        if (
-                            TTS_PREFETCH
-                            and TTS_PREFETCH_POLICY == "adaptive"
-                            and playback.buffered_seconds
-                            >= TTS_PREFETCH_MIN_BUFFER_SECONDS
-                        ):
-                            start_next_prefetch()
-                        first_ready_ms = (
-                            round((time.perf_counter() - request_started) * 1000)
-                            if index == 1
-                            else None
-                        )
-                    render_detail["adaptive_stride"] = ADAPTIVE_RENDER_STRIDE
-                    render_detail["stride_reason"] = stride_reason
-                    render_detail["buffer_before_render_seconds"] = round(
-                        buffer_before_render,
-                        3,
-                    )
-                    render_detail["next_prefetch_started"] = next_prefetch_started
-                    render_detail["next_prefetch_buffer_seconds"] = (
-                        round(next_prefetch_buffer_seconds, 3)
-                        if next_prefetch_buffer_seconds is not None
-                        else None
-                    )
-                    render_seconds = time.perf_counter() - started
-                    total_render += render_seconds
-                    RENDERER.measured(render_detail.get("effective_fps", 0))
-                    underrun_ms = (
-                        playback.audio_underruns - underruns_before
-                    ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
-                    video_underrun_ms = (
-                        playback.video_underruns - video_underruns_before
-                    ) / VIDEO_FPS * 1000
-                    video_dropped_ms = (
-                        playback.video_dropped - video_dropped_before
-                    ) / VIDEO_FPS * 1000
-                    speech_hold_ms = (
-                        playback.speech_holds - speech_holds_before
-                    ) * AUDIO_SAMPLES / AUDIO_RATE * 1000
-
-                    LOG.info(
-                        "Phrase %d/%d timings: voice=%s tts=%.3fs tts_wait=%dms "
-                        "tts_overlap=%dms prefetched=%s first_byte=%dms download=%dms "
-                        "render=%.3fs backend=%s stride=%d adaptive=%s reason=%s "
-                        "buffer_before=%.3fs prefetch_policy=%s next_prefetch=%s "
-                        "prefetch_buffer=%.3fs motion=%dms "
-                        "motion_reference_reset=%s persistent_motion=%s "
-                        "frame_loop=%dms effective_fps=%.2f windows=%d first_window=%dms "
-                        "pipeline=%dms "
-                        "decode=%dms frames=%d/%d playback_fps=%.2f media=%.3fs "
-                        "buffer=%.3fs underrun=%.0fms",
-                        index,
-                        len(phrases),
-                        voice.mode,
-                        tts_seconds,
-                        tts_wait_ms,
-                        tts_overlap_ms,
-                        audio_result["prefetched"],
-                        tts_detail["first_byte_ms"],
-                        tts_detail["download_ms"],
-                        render_seconds,
-                        render_detail["backend"],
-                        render_detail["render_stride"],
-                        render_detail["adaptive_stride"],
-                        render_detail["stride_reason"],
-                        render_detail["buffer_before_render_seconds"],
-                        TTS_PREFETCH_POLICY if TTS_PREFETCH else "off",
-                        render_detail["next_prefetch_started"],
-                        render_detail["next_prefetch_buffer_seconds"] or 0.0,
-                        render_detail["motion_ms"],
-                        render_detail.get("motion_reference_reset", True),
-                        render_detail.get("persistent_phrase_motion", False),
-                        render_detail["frame_loop_ms"],
-                        render_detail["effective_fps"],
-                        render_detail.get("window_count", 0),
-                        render_detail.get("first_window_ms", 0),
-                        render_detail["pipeline_ms"],
-                        render_detail["decode_ms"],
-                        render_detail["frames"],
-                        render_detail["motion_frames"],
-                        render_detail["playback_fps"],
-                        media_duration,
-                        playback.buffered_seconds,
-                        underrun_ms,
-                    )
-                    await _send_event(
-                        channel,
-                        "metrics",
-                        chunk=index,
-                        chunks=len(phrases),
-                        phrase=phrase,
-                        voice_mode=voice.mode,
-                        tts_provider=TTS_PROVIDER,
-                        voice_reference_used=voice.reference_path is not None,
-                        tts_ms=round(tts_seconds * 1000),
-                        tts_wait_ms=tts_wait_ms,
-                        tts_overlap_ms=tts_overlap_ms,
-                        tts_prefetched=audio_result["prefetched"],
-                        tts_prefetch_policy=(
-                            TTS_PREFETCH_POLICY if TTS_PREFETCH else "off"
-                        ),
-                        next_tts_prefetch_started=render_detail[
-                            "next_prefetch_started"
-                        ],
-                        next_tts_prefetch_buffer_seconds=render_detail[
-                            "next_prefetch_buffer_seconds"
-                        ],
-                        tts_headers_ms=tts_detail["headers_ms"],
-                        tts_first_byte_ms=tts_detail["first_byte_ms"],
-                        tts_download_ms=tts_detail["download_ms"],
-                        tts_finalize_ms=tts_detail["finalize_ms"],
-                        tts_bytes=tts_detail["bytes"],
-                        render_ms=round(render_seconds * 1000),
-                        render_backend=render_detail["backend"],
-                        render_stride=render_detail["render_stride"],
-                        render_adaptive_stride=render_detail["adaptive_stride"],
-                        render_stride_reason=render_detail["stride_reason"],
-                        render_buffer_before_seconds=render_detail[
-                            "buffer_before_render_seconds"
-                        ],
-                        render_motion_ms=render_detail["motion_ms"],
-                        render_motion_reference_reset=render_detail.get(
-                            "motion_reference_reset", True
-                        ),
-                        render_persistent_phrase_motion=render_detail.get(
-                            "persistent_phrase_motion", False
-                        ),
-                        render_animation_region=render_detail.get(
-                            "animation_region", AVATAR_ANIMATION_REGION
-                        ),
-                        render_driving_multiplier=render_detail.get(
-                            "driving_multiplier", AVATAR_DRIVING_MULTIPLIER
-                        ),
-                        render_normalize_lip=render_detail.get(
-                            "normalize_lip", AVATAR_NORMALIZE_LIP
-                        ),
-                        render_eye_retargeting=render_detail.get(
-                            "eye_retargeting", AVATAR_EYE_RETARGETING
-                        ),
-                        render_lip_retargeting=render_detail.get(
-                            "lip_retargeting", AVATAR_LIP_RETARGETING
-                        ),
-                        render_frame_loop_ms=render_detail["frame_loop_ms"],
-                        render_effective_fps=render_detail["effective_fps"],
-                        render_incremental_windows=render_detail.get(
-                            "incremental_windows", False
-                        ),
-                        render_window_size=render_detail.get("window_size", 0),
-                        render_window_count=render_detail.get("window_count", 0),
-                        render_first_window_ms=render_detail.get(
-                            "first_window_ms", 0
-                        ),
-                        render_window_mean_ms=render_detail.get(
-                            "window_mean_ms", 0
-                        ),
-                        render_window_max_ms=render_detail.get(
-                            "window_max_ms", 0
-                        ),
-                        render_pipeline_ms=render_detail["pipeline_ms"],
-                        render_decode_ms=render_detail["decode_ms"],
-                        render_pipeline_reported_ms=render_detail[
-                            "pipeline_reported_ms"
-                        ],
-                        render_motion_frames=render_detail["motion_frames"],
-                        render_frames=render_detail["frames"],
-                        render_source_fps=render_detail["source_fps"],
-                        render_playback_fps=render_detail["playback_fps"],
-                        media_seconds=round(media_duration, 3),
-                        buffered_seconds=round(playback.buffered_seconds, 3),
-                        underrun_ms=round(underrun_ms),
-                        video_underrun_ms=round(video_underrun_ms),
-                        video_dropped_ms=round(video_dropped_ms),
-                        speech_hold_ms=round(speech_hold_ms),
-                        speech_lead_ms=round(playback.speech_lead_seconds * 1000),
-                        render_fps_estimate=round(RENDERER.fps_estimate, 3),
-                        first_ready_ms=first_ready_ms,
-                    )
-
-                    if index == 1 and not incremental:
-                        await _send_event(
-                            channel,
-                            "playing",
-                            message=f"Playing phrase 1/{len(phrases)} while preparing the rest…",
-                            duration=round(media_duration, 3),
-                            first_ready_ms=first_ready_ms,
-                        )
-
-        playback.finish()
-        generation_seconds = time.perf_counter() - request_started
-        await _send_event(
-            channel,
-            "status",
-            phase="draining",
-            message="All phrases generated; finishing playback…",
-        )
-        while playback.busy:
-            await asyncio.sleep(0.05)
-
-        total_seconds = time.perf_counter() - request_started
-        await _send_event(
-            channel,
-            "summary",
-            message="Progressive playback complete",
-            chunks=len(phrases),
-            tts_ms=round(total_tts * 1000),
-            render_ms=round(total_render * 1000),
-            generation_ms=round(generation_seconds * 1000),
-            total_ms=round(total_seconds * 1000),
-            underrun_ms=round(
-                playback.audio_underruns * AUDIO_SAMPLES / AUDIO_RATE * 1000
-            ),
-            video_underrun_ms=round(
-                playback.video_underruns / VIDEO_FPS * 1000
-            ),
-            video_dropped_ms=round(playback.video_dropped / VIDEO_FPS * 1000),
-            speech_hold_ms=round(
-                playback.speech_holds * AUDIO_SAMPLES / AUDIO_RATE * 1000
-            ),
-        )
-        await _send_event(channel, "ready", message="Ready")
-    except asyncio.CancelledError:
-        playback.clear()
-        raise
-    except Exception as exc:
-        playback.clear()
-        LOG.exception("Avatar generation failed")
-        await _send_event(channel, "error", message=str(exc))
-    finally:
-        if tts_task is not None:
-            if not tts_task.done():
-                tts_task.cancel()
-            await asyncio.gather(tts_task, return_exceptions=True)
-
-
-
-
-async def _warmup_pipeline() -> None:
-    """Exercise the same TTS, JoyVASA and renderer path before the first user."""
-    global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
-    global tts_startup_wait_seconds
-
-    started = time.perf_counter()
-    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
-    LOG.info("Startup warm-up begins with %r", WARMUP_TEXT)
-    try:
-        tts_startup_wait_seconds = await TTS.wait_until_ready()
-        with tempfile.TemporaryDirectory(prefix="warmup-", dir=RESULTS_ROOT) as tmp:
-            warmup_dir = Path(tmp)
-            pcm_path = warmup_dir / "warmup.pcm"
-            wav_path = warmup_dir / "warmup.wav"
-            try:
-                warmup_voice = TTS.resolve_voice(TTS_DEFAULT_VOICE_MODE)
-            except ValueError as exc:
-                LOG.warning(
-                    "Default voice mode is unavailable during warm-up (%s); "
-                    "warming the built-in voice instead",
-                    exc,
-                )
-                warmup_voice = TTS.resolve_voice(VOICE_MODE_DESIGN)
-            pcm, tts_detail = await TTS.synthesize(
-                WARMUP_TEXT,
-                warmup_voice,
-                pcm_path,
-                wav_path,
-            )
-            frames, fps, render_detail = await asyncio.to_thread(
-                RENDERER.render,
-                wav_path,
-            )
-            if USE_NEURAL_IDLE_FRAME:
-                if not frames:
-                    raise RuntimeError(
-                        "Startup warm-up returned no frame for the neural idle image"
-                    )
-                selected_index = min(
-                    max(WARMUP_IDLE_FRAME_INDEX, 0),
-                    len(frames) - 1,
-                )
-                # WebRTC must start in the same aligned, neural render space as
-                # speech. The source photograph stays hidden and is used only
-                # to initialise FasterLivePortrait.
-                IDLE_FRAME.frame = frames[selected_index].copy()
-                IDLE_FRAME.source = "startup-warmup-neural-frame"
-                IDLE_FRAME.index = selected_index
-                LOG.info(
-                    "Neural idle frame prepared from warm-up frame %d/%d",
-                    selected_index,
-                    len(frames),
-                )
-            warmup_seconds = time.perf_counter() - started
-            warmup_metrics = {
-                "tts_startup_wait_ms": round(tts_startup_wait_seconds * 1000),
-                "tts": tts_detail,
-                "voice_mode": warmup_voice.mode,
-                "render": render_detail,
-                "idle_frame_source": IDLE_FRAME.source,
-                "idle_frame_index": IDLE_FRAME.index,
-                "media_seconds": round(
-                    max(len(pcm) / 24_000, len(frames) / max(fps, 1.0)),
-                    3,
-                ),
-            }
-            RENDERER.measured_at_warmup(render_detail.get("effective_fps", 0.0))
-            warmup_complete = True
-            LOG.info(
-                "Startup warm-up complete: total=%.3fs tts=%dms pipeline=%dms "
-                "decode=%dms frames=%d",
-                warmup_seconds,
-                tts_detail["total_ms"],
-                render_detail["pipeline_ms"],
-                render_detail["decode_ms"],
-                render_detail["frames"],
-            )
-    except Exception as exc:
-        warmup_seconds = time.perf_counter() - started
-        warmup_error = str(exc)
-        LOG.exception(
-            "Startup warm-up failed after %.3fs; continuing without warm-up",
-            warmup_seconds,
-        )
+
+
+
+
+
+
+
+
 
 
 @asynccontextmanager
@@ -907,10 +249,10 @@ async def lifespan(_app: FastAPI):
         IDLE_FRAME.frame = load_avatar(Path(SETTINGS.image_path))
         LOG.info("Loading FasterLivePortrait and source portrait")
         await asyncio.to_thread(RENDERER.load)
-        await _warmup_pipeline()
+        await SPEAKER.warm_up()
         LOG.info("Avatar pipeline is ready")
     except Exception as exc:
-        startup_error = str(exc)
+        startup_error = SPEAKER.unavailable = str(exc)
         LOG.exception("Avatar pipeline initialization failed")
 
     yield
@@ -930,6 +272,7 @@ async def index() -> FileResponse:
 @app.get("/health")
 async def health() -> JSONResponse:
     tts_ready = await TTS.is_ready()
+    warmup = SPEAKER.warmup
 
     providers = ort.get_available_providers()
     preset_configured, preset_problem = TTS.preset_configuration()
@@ -953,18 +296,18 @@ async def health() -> JSONResponse:
         "catchup_render_stride": CATCHUP_RENDER_STRIDE,
         "catchup_buffer_seconds": CATCHUP_BUFFER_SECONDS,
         "render_stride": RENDER_STRIDE,
-        "startup_warmup_complete": warmup_complete,
+        "startup_warmup_complete": warmup.complete,
         "startup_warmup_seconds": (
-            round(warmup_seconds, 3) if warmup_seconds is not None else None
+            round(warmup.seconds, 3) if warmup.seconds is not None else None
         ),
-        "startup_warmup_metrics": warmup_metrics,
-        "startup_warmup_error": warmup_error,
+        "startup_warmup_metrics": warmup.metrics,
+        "startup_warmup_error": warmup.error,
         "neural_idle_frame_enabled": USE_NEURAL_IDLE_FRAME,
         "idle_frame_source": IDLE_FRAME.source,
         "idle_frame_index": IDLE_FRAME.index,
         "tts_startup_wait_seconds": (
-            round(tts_startup_wait_seconds, 3)
-            if tts_startup_wait_seconds is not None
+            round(warmup.tts_wait_seconds, 3)
+            if warmup.tts_wait_seconds is not None
             else None
         ),
         "tts_prefetch": TTS_PREFETCH,
@@ -1078,7 +421,7 @@ async def offer(request: Request) -> JSONResponse:
         if conductor is not None:
             await conductor.on_avatar_speaking(True)
         try:
-            await _create_clip(
+            await SPEAKER.speak(
                 text, voice_mode, playback, peer_channel.get("channel")
             )
         finally:
@@ -1105,7 +448,7 @@ async def offer(request: Request) -> JSONResponse:
         async def show(self, state: dict[str, Any]) -> None:
             channel = peer_channel.get("channel")
             if channel is not None:
-                await _send_event(channel, "conversation", **state)
+                await send_event(channel, "conversation", **state)
 
     if conductor is not None:
         run_job(speak_queued())
@@ -1115,7 +458,7 @@ async def offer(request: Request) -> JSONResponse:
         channel = peer_channel.get("channel")
         if channel is None:
             return
-        await _send_event(
+        await send_event(
             channel,
             "transcript",
             kind=event.type,
@@ -1181,7 +524,7 @@ async def offer(request: Request) -> JSONResponse:
             if ready_announced or getattr(channel, "readyState", None) != "open":
                 return
             ready_announced = True
-            task = asyncio.create_task(_send_event(channel, "ready", message="Ready"))
+            task = asyncio.create_task(send_event(channel, "ready", message="Ready"))
             jobs.add(task)
             task.add_done_callback(jobs.discard)
 
@@ -1234,7 +577,7 @@ async def offer(request: Request) -> JSONResponse:
                 return
             if len(text) > MAX_TEXT_LENGTH:
                 task = asyncio.create_task(
-                    _send_event(
+                    send_event(
                         channel,
                         "error",
                         message=f"Text is limited to {MAX_TEXT_LENGTH} characters.",

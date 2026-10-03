@@ -105,6 +105,19 @@ class AudioClockedVideoTests(unittest.TestCase):
         # and the request waited on `busy` forever.
         self.assertFalse(playback.busy)
 
+    def test_split_windows_do_not_accumulate_rounding_drift(self) -> None:
+        # 24 frames at 12.5 fps are 1.92 s = 58 frames at 30 fps. Appending
+        # them as three windows must give exactly those 58, not 3 x 20.
+        playback = PlaybackBuffer()
+        playback.begin()
+        playback.begin_phrase_stream(pcm(1.92), RENDER_FPS, 24)
+        counts = []
+        for start in (0, 8, 16):
+            before = len(playback.video)
+            playback.append_video_window(numbered_frames(start, 8))
+            counts.append(len(playback.video) - before)
+        self.assertEqual(counts, [20, 19, 19])
+
     def test_audio_waits_for_the_first_video_window(self) -> None:
         # Phrase audio is queued before the renderer has produced anything.
         # Speech must not start on the idle image.
