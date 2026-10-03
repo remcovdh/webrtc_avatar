@@ -48,6 +48,12 @@ results/review/
 results/system1/
 results/*.wav
 
+# Voices: reference recordings (and anything derived from them) stay on this
+# machine. A voice is personal data; see inputs/README.md.
+inputs/*
+!inputs/README.md
+!inputs/avatar*.jpg
+
 # Jupyter Notebooks
 .ipynb_checkpoints
 

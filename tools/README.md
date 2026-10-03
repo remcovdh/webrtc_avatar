@@ -25,7 +25,8 @@ container are fed through `python -` so nothing needs to be copied in.
 load a second copy of a model, which does not fit next to the running avatar on
 the 16 GB GPU.
 
-Test audio lives in `tools/audio/` (committed): `question.wav` ("Why is the
+Test audio lives in `tools/audio/` (committed; spoken by Chatterbox's built-in
+voices, never by a cloned voice): `question.wav` ("Why is the
 avatar so fast?", answerable from `knowledge/`), `gap.wav` ("What is the capital
 of France?", a knowledge gap) and `dutch.wav` (a Dutch question). The avatar
 container sees them as `/workspace/tools/audio/` (mounted read-only). Make new

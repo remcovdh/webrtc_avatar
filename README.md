@@ -37,9 +37,12 @@ for the listening side.
   current driver and the NVIDIA Container Toolkit
 - Disk space for the images, checkpoints and models (the test machine uses
   about 105 GB in total)
-- A clear, front-facing portrait as `inputs/avatar.jpg` and a reference
-  recording of the voice as `inputs/voice-preset-nohello.wav`; use a face and
-  a voice you have the right to use
+- A clear, front-facing portrait as `inputs/avatar.jpg` (an example is
+  included) and, for a cloned voice, a reference recording as
+  `inputs/voice-preset-nohello.wav`. Voice recordings are never part of this
+  repository and need the speaker's consent; see
+  [inputs/README.md](inputs/README.md). Without one the avatar uses
+  Chatterbox's built-in voice.
 
 ## Quick start
 
@@ -131,7 +134,8 @@ dependency on purpose.
 
 ## Licences and upstream projects
 
-This repository holds no model weights and no third-party code; the build
+The code is under the [MIT licence](LICENSE). This repository holds no model
+weights and no third-party code; the build
 installs and the first start downloads them.
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every upstream project
 and model with its licence, and what to know before using the result beyond

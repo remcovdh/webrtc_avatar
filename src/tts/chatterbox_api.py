@@ -63,10 +63,7 @@ def _load_model():
     if VARIANT in {"multilingual", "multilingual-v3"}:
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        return ChatterboxMultilingualTTS.from_pretrained(
-            device=DEVICE,
-            t3_model="v3",
-        )
+        return ChatterboxMultilingualTTS.from_pretrained(device=torch.device(DEVICE))
     raise ValueError(
         "CHATTERBOX_VARIANT must be turbo, nano, original or multilingual-v3"
     )

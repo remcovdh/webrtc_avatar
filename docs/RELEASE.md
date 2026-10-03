@@ -26,7 +26,14 @@
   2% in scale on five test portraits). `AVATAR_FACE_DETECTOR=insightface`
   switches back.
 - `THIRD_PARTY_NOTICES.md` lists every upstream project and model with its
-  licence.
+  licence. The code is MIT-licensed (`LICENSE`).
+- **No voices in the repository.** The reference recordings are out of git and
+  `inputs/` is ignored except for the example portraits; `inputs/README.md`
+  says what consent a voice needs. The three test recordings in `tools/audio/`
+  are re-recorded with Chatterbox's built-in voices. Without a reference
+  recording the avatar speaks with the built-in voice.
+- Fixed: `CHATTERBOX_VARIANT=multilingual` failed to load (an argument the
+  installed Chatterbox version does not have).
 
 # neural-avatar-v2z-server-split
 

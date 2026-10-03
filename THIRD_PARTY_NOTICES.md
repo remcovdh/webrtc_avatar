@@ -1,7 +1,7 @@
 # Third-party notices
 
-This repository contains only its own code, documentation and a few input
-files. It does **not** contain any model weights or third-party source code:
+This repository contains only its own code and documentation (MIT, see
+`LICENSE`) and a few example input files. It does **not** contain any model weights or third-party source code:
 the Docker build installs the software listed here, and the first start
 downloads the models. Whoever builds, runs or redistributes the result is bound
 by the licences below.
@@ -84,14 +84,14 @@ no longer downloaded.
 
 The complete package lists are `docker/locks/*.txt`.
 
-## Input files in this repository
+## Files in this repository
 
-- `inputs/avatar.jpg`: the portrait in use, generated with Midjourney; it
-  shows no real person. The other `inputs/avatar*.jpg` are earlier test
-  portraits. They are test material for this project and are not covered by
-  the code licence.
-- `inputs/*voice-preset*`: reference recordings for the cloned voice, and
-  their transcripts. Test material, not covered by the code licence; replace
-  them with a voice you have the right to use.
-- `tools/audio/*.wav`: short test questions spoken by the project's own TTS.
+The code and documentation are under the MIT licence (`LICENSE`).
+
+- `inputs/avatar*.jpg`: example portraits generated with Midjourney; they show
+  no real person. They are test material and not covered by the code licence.
+- No voice recordings: reference voices stay on the machine that uses them
+  (`inputs/README.md` explains why and what consent is needed).
+- `tools/audio/*.wav`: three short test questions spoken by Chatterbox's
+  built-in voices, not by a cloned voice.
 - `knowledge/*.md`: example notes about this project.
