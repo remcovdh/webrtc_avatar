@@ -1,7 +1,7 @@
 # Backlog
 
 Ideas and follow-ups to pick up later. Newest decisions first; see
-`REALTIME_BASELINE.md` for what already works.
+`docs/architecture/realtime-rendering.md` for what already works.
 
 ## Listening avatar (planned 2026-09-26)
 
@@ -47,7 +47,7 @@ Decided so far:
 - Access: the user opens the page from their own machine, so the server gets
   **HTTPS with a self-signed certificate** (SAN for the VM's IP and localhost),
   generated once into a gitignored folder. HTTPS on port 8443; plain HTTP on
-  8000 stays for local tools (health checks, `review_recording.sh`). This is
+  8000 stays for local tools (health checks, `scripts/review_recording.sh`). This is
   closer to running it elsewhere later.
 - Feedback in three layers: (1) correct System 1's class in the UI, stored at
   once; (2) similar later utterances follow the correction immediately

@@ -2,7 +2,7 @@
 
 Agreed on 2026-09-26. The avatar learns to listen (Dutch and English), reacts
 quickly through a "System 1", and answers questions from a personal knowledge
-folder through a "System 2". `BACKLOG.md` keeps the ideas for later.
+folder through a "System 2". [`BACKLOG.md`](../../BACKLOG.md) keeps the ideas for later.
 
 ## Decisions
 
@@ -45,7 +45,7 @@ one new class behind the same interface.
 | # | Milestone | Done when |
 |---|---|---|
 | M1 | Listening: HTTPS, microphone over WebRTC, VAD, streaming ASR, diarization behind the `Listener` interface; live transcript with speaker labels in the page. | Dutch and English speech appears correctly within ~0.5 s; GPU memory and latency measured next to the running avatar. |
-| M2 | Conductor + interfaces: conversation logic moves out of `server.py`; turn-taking, push-to-talk, conversation log. The avatar repeats what it heard. | A full loop runs through the interfaces; the text box still works. |
+| M2 | Conductor + interfaces: conversation logic moves out of `src/avatar/server.py`; turn-taking, push-to-talk, conversation log. The avatar repeats what it heard. | A full loop runs through the interfaces; the text box still works. |
 | M3 | System 1: Laya, topic extraction, reaction phrases, correction UI with immediate effect. | Reactions feel right for most sentences; a correction applies to a similar sentence at once. |
 | M4 | System 2: knowledge folder, retrieval, LLM comparison, streamed answers, honest "I don't know". | Questions about the Markdown pages get short, correct answers; others get "I don't know". |
 | M5 | Nightly learning: LLM review, suggested classes and knowledge gaps, Laya fine-tuning. | A readable morning report and a better System 1. |
@@ -67,7 +67,7 @@ Each milestone is its own version with its own explanation and commit.
   correctly; it costs ~24 ms of GPU per 0.64 s of audio.
 - **M2 done (v2T, 2026-09-26).** The user tested it: works well in English;
   Dutch recognition is somewhat weaker but OK; echoing Dutch text with the
-  English voice sounds comical (English-only replies are the agreed v1). `conductor.py` runs as its own
+  English voice sounds comical (English-only replies are the agreed v1). `src/conductor/app.py` (then `conductor.py`) runs as its own
   process/image; the avatar reaches it through `ConductorClient` (the
   `Conductor` interface) and receives `say`/`show` (the `AvatarOutput`
   interface). Turn-taking as agreed; the listener's utterance silence was
@@ -75,9 +75,9 @@ Each milestone is its own version with its own explanation and commit.
   conductor subtracts it). Measured end to end with test audio: turn over 0.4 s
   after the final text (no punctuation: 700 - 300 ms), avatar starts replying
   1.4 s later. Every turn is a JSON line in `results/conversations/`; audio is
-  opt-in (`LISTENER_SAVE_AUDIO=true`); `forget.py` deletes logs.
+  opt-in (`LISTENER_SAVE_AUDIO=true`); `src/conductor/forget.py` deletes logs.
 - **M3 done (v2U, 2026-09-26).** The user tested it: works OK; the turn
-  sometimes ends a little too early (backlog). `system1.py` behind the
+  sometimes ends a little too early (backlog). `src/conductor/system1.py` behind the
   `System1` interface; the conductor's `System1Responder` picks an English
   reaction per decision. Measured zero-shot on 16 Dutch/English utterances:
   intent 11/16, emotion 4-9/16 depending on option order (a strong bias to
@@ -91,9 +91,9 @@ Each milestone is its own version with its own explanation and commit.
   Corrections from the page apply at once (verified end to end).
 - **M4 done (v2V, 2026-09-30).** The user tested it; testing also exposed two
   audio problems, both fixed in v2V (a reference voice starting with "Hello",
-  and laptop amplifiers clipping the first word after silence). `knowledge.py`
+  and laptop amplifiers clipping the first word after silence). `src/conductor/knowledge.py`
   (`MarkdownKnowledge`: sections per heading, multilingual-e5-small on the CPU,
-  re-indexed on change) and `system2.py` (`LlamaSystem2`: llama.cpp in the
+  re-indexed on change) and `src/conductor/system2.py` (`LlamaSystem2`: llama.cpp in the
   conductor, compiled for sm_120). Retrieval scores: answerable questions
   0.834-0.904, unanswerable 0.706-0.767, so `min_score` 0.8. LLM comparison
   on the same questions: Llama 3.2 3B chosen (median 260 ms, 2.6 GB, short,
@@ -123,7 +123,7 @@ Each milestone is its own version with its own explanation and commit.
   JevK5 + Qwen3 do not fit next to the running avatar on the 16 GB GPU, the
   review script pauses the avatar and TTS while it runs.
 
-- **M5 done (v2W, 2026-09-30).** `review.py`/`review.sh` as decided. First run
+- **M5 done (v2W, 2026-09-30).** `src/conductor/review.py` / `scripts/review.sh` as decided. First run
   over all 65 logged turns (27 sessions): the review model took 49 s (the whole
   script ~1.5 min including pausing and restarting the avatar). It found real
   problems from the user's tests, mostly from the Laya period (e.g. "I like to

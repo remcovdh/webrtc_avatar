@@ -20,7 +20,7 @@ from conductor.knowledge import Passage
 LOG = logging.getLogger("system2")
 
 # "<huggingface repo>::<gguf file>". Chosen by measurement (see
-# LISTENING_PLAN.md): Llama 3.2 3B answered fastest (median 260 ms), shortest
+# docs/architecture/listening.md): Llama 3.2 3B answered fastest (median 260 ms), shortest
 # and always in English; Qwen3 4B was richer but too long for speech; Phi-4-mini
 # answered Dutch questions in Dutch.
 MODEL = os.getenv(

@@ -1,3 +1,31 @@
+# neural-avatar-v2y-structure
+
+## v2Y repository structure
+
+No behaviour change; the files moved.
+
+- Code is one Python package per service under `src/`: `avatar`, `conductor`,
+  `listener`, `tts`, plus `shared` for the two protocol modules. Imports are
+  package imports and the services start as modules (`python -m avatar.serve`,
+  `python -m conductor.app`, `python -m listener.worker`). Renamed on the way:
+  `avatar_config.py` -> `src/avatar/config.py`, `conductor.py` ->
+  `src/conductor/app.py`, `listener_worker.py` -> `src/listener/worker.py`.
+- Tests are in `tests/<service>/`. The images keep the repo's layout under
+  `/workspace/app`, so tests run the same on the host and in the build.
+  `tools/run_tests.sh` runs every service's tests against the working tree
+  without a rebuild. `test_benchmark_handshake.py` was never part of the
+  build's test run and had gone stale; it is fixed and runs now.
+- `scripts/` holds what you run in normal use (`benchmark.sh`,
+  `quality_benchmark.sh`, `review.sh`, `review_recording.sh`,
+  `benchmark_avatar.py`); `tools/` keeps the diagnosis scripts (now including
+  `lip_sync_analysis.py`). `docker/` holds the Dockerfile and entrypoint.
+- Documentation: a short current `README.md`; `CONFIG.md` and `BACKLOG.md` stay
+  in the root; `docs/` has an index, `architecture/` and `history/`. The old
+  README body is kept unchanged as `docs/history/readme-until-v2w.md`.
+- `SHA256SUMS` is gone; git already guarantees file integrity.
+
+Earlier entries below use the file names of their time.
+
 # neural-avatar-v2x-config
 
 ## v2X one configuration

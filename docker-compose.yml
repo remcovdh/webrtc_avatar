@@ -17,7 +17,7 @@ services:
     volumes: *model-volumes
     restart: "no"
 
-  # Chatterbox TTS behind chatterbox_api.py, in its own image because its
+  # Chatterbox TTS behind src/tts/chatterbox_api.py, in its own image because its
   # dependencies clash with the avatar's.
   tts:
     build:
@@ -83,7 +83,7 @@ services:
     restart: unless-stopped
 
   # Conductor (M2): turn-taking, replies and the local conversation log
-  # (results/conversations/). Delete logs with forget.py (see its header).
+  # (results/conversations/). Delete logs with src/conductor/forget.py (see its header).
   conductor:
     build:
       context: .
@@ -133,7 +133,7 @@ services:
     gpus: all
     ipc: host
     shm_size: 8gb
-    # The avatar's settings, defaults and profiles live in avatar_config.py
+    # The avatar's settings, defaults and profiles live in src/avatar/config.py
     # (described in CONFIG.md). Compose only passes on what the shell or .env
     # sets, under the same name; nothing here has a value of its own.
     environment:

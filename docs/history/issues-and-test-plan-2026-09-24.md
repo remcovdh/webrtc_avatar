@@ -1,5 +1,9 @@
 # Neural Avatar: Current Issues and Automated Test Plan
 
+> Historical snapshot of 24 September 2026 (build v2N, before real-time rendering,
+> listening and the configuration clean-up). Kept for the record; see the
+> [docs index](../README.md) for current documents.
+
 **Status date:** 2026-09-24  
 **Current build:** `neural-avatar-v2n2-1-build-fixture-fix`  
 **Target hardware:** NVIDIA GeForce RTX 5080 Laptop GPU  

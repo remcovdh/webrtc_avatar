@@ -7,15 +7,15 @@ container are fed through `python -` so nothing needs to be copied in.
 
 | Tool | What it answers | How to run |
 |---|---|---|
-| `../review_recording.sh` | What does a phrase look like (frames, mouth close-ups)? | `./review_recording.sh "text"` |
+| `../scripts/review_recording.sh` | What does a phrase look like (frames, mouth close-ups)? | `scripts/review_recording.sh "text"` |
 | `mic_turn.py` | What does System 1/2 do with this spoken input? | `docker compose exec -T webrtc-avatar python - en-US /workspace/tools/audio/question.wav < tools/mic_turn.py` |
 | `multi_say.py` | Do several sentences in one session arrive complete? Records `results/multi_say.wav`. | `docker compose exec -T webrtc-avatar python - "Great, then we agree." "Okay, I'll stop." < tools/multi_say.py` |
 | `transcribe.sh` | What did the avatar really say? (ASR as an "ear") | `tools/transcribe.sh results/some.wav ...` |
 | `eval_system1.py` | How well does a JevK5 model classify 18 Dutch/English utterances? | pause the avatar, then `docker compose run --rm --no-deps -T conductor python - < tools/eval_system1.py` |
 | `eval_system2.py` | Retrieval threshold and LLM answers/speed | pause the avatar, then `docker compose run --rm --no-deps -T conductor python - < tools/eval_system2.py` |
-| `run_tests.sh` | Do the avatar's unit tests pass on the working tree, without rebuilding the image? | `tools/run_tests.sh` (all) or `tools/run_tests.sh test_av_sync.py` |
+| `run_tests.sh` | Do the unit tests of every service pass on the working tree, without rebuilding an image? | `tools/run_tests.sh` (all), `tools/run_tests.sh conductor`, or `tools/run_tests.sh avatar test_av_sync.py` |
 | `config_snapshot.py` | Did a change alter the effective configuration (Compose environment per service + `/health` settings)? | `tools/config_snapshot.py check` on the host; `save` records a new reference in `config/reference/` |
-| `../lip_sync_analysis.py` | Does JoyVASA's mouth lead or lag the voice? | see its header |
+| `lip_sync_analysis.py` | Does JoyVASA's mouth lead or lag the voice? | see its header |
 
 "Pause the avatar" means `docker compose stop webrtc-avatar tts` (and
 `docker compose start webrtc-avatar tts` afterwards): the evaluation scripts

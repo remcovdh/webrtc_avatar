@@ -1,7 +1,7 @@
 # Configuration
 
 Every setting of the stack: its name, default and meaning. The avatar service's
-settings are defined in one place, `avatar_config.py`; the tables for it below
+settings are defined in one place, `src/avatar/config.py`; the tables for it below
 mirror that file.
 
 ## How it works
@@ -23,8 +23,8 @@ mirror that file.
   switch changed is marked as an experiment.
 
 ```bash
-python3 avatar_config.py show       # effective settings, overrides, warnings
-python3 avatar_config.py profiles   # what each profile changes
+python3 src/avatar/config.py show       # effective settings, overrides, warnings
+python3 src/avatar/config.py profiles   # what each profile changes
 tools/config_snapshot.py check      # running stack against config/reference/
 ```
 
@@ -41,7 +41,7 @@ tools/config_snapshot.py check      # running stack against config/reference/
 and keeps every phrase's audio and motion for analysis. The benchmark profiles
 run phrases serially so timings are comparable: `benchmark-runtime` measures
 the live render path, `benchmark-visual` renders every frame of a whole phrase
-before playing it. `quality_benchmark.sh` and `benchmark.sh` use them.
+before playing it. `scripts/quality_benchmark.sh` and `scripts/benchmark.sh` use them.
 
 ## Avatar: behaviour settings
 
@@ -129,7 +129,7 @@ The avatar warns when one of these is set while its switch is off:
 - The idle frame index needs `AVATAR_USE_NEURAL_IDLE_FRAME=true`.
 - `AVATAR_PHRASE_MIN_FIRST_CHARS` needs `AVATAR_MERGE_SHORT_OPENING_PHRASE=true`.
 
-## TTS (`chatterbox_api.py`, `entrypoint.sh`, build arguments)
+## TTS (`src/tts/chatterbox_api.py`, `docker/entrypoint.sh`, build arguments)
 
 | Variable | Default | Class |
 |---|---|---|
@@ -145,7 +145,7 @@ The avatar warns when one of these is set while its switch is off:
 `CHATTERBOX_EXAGGERATION` and `CHATTERBOX_CFG_WEIGHT` to the `original` variant
 only.
 
-## Listener (`listener_worker.py`)
+## Listener (`src/listener/worker.py`)
 
 | Variable | Default | Class |
 |---|---|---|
@@ -162,7 +162,7 @@ only.
 | `LISTENER_PREROLL_MS` | 300 | profile |
 | `LISTENER_FLUSH_MS` | 700 | profile |
 
-## Conductor (`conductor.py`, `system1.py`, `system2.py`, `knowledge.py`, `review.py`)
+## Conductor (`src/conductor/`: `app.py`, `system1.py`, `system2.py`, `knowledge.py`, `review.py`)
 
 | Variable | Default | Class |
 |---|---|---|
@@ -213,7 +213,7 @@ that disagreed, most with a different name on the host and in the container.
   `TTS_DEFAULT_VOICE_MODE` → `AVATAR_DEFAULT_VOICE_MODE`, `TTS_URL` →
   `AVATAR_TTS_URL`, `AVATAR_PATH` → `AVATAR_IMAGE_PATH`, `LOG_LEVEL` →
   `AVATAR_LOG_LEVEL` (avatar only). The full list is `RENAMED` in
-  `avatar_config.py`; an old name stops the avatar with a message naming the
+  `src/avatar/config.py`; an old name stops the avatar with a message naming the
   new one.
 - Became code constants (never varied in practice): `STARTUP_WARMUP`, `WARMUP_TEXT`, `TTS_STARTUP_WAIT_SECONDS`, `TTS_STARTUP_POLL_SECONDS`, `MAX_TEXT_LENGTH`, `JOYVASA_CFG_SCALE`, `BREEZE_SEED`, `CHATTERBOX_MAX_REFERENCE_BYTES`, `SYSTEM1_TEMPERATURE`.
 - Dead flags that only kept the legacy MP4 render route alive:

@@ -1,6 +1,6 @@
 """Conversation review (M5): what went well, what went wrong, what to improve.
 
-Run by hand with `./review.sh` (it pauses the avatar so the review model fits on
+Run by hand with `scripts/review.sh` (it pauses the avatar so the review model fits on
 the GPU). Reads the conversation logs written since the previous review and
 writes `results/review/<timestamp>.md` plus a `.json` with the suggestions.
 Nothing is changed automatically: you decide what to apply to

@@ -3,7 +3,7 @@
 Start the avatar with AVATAR_DEBUG_DUMP_DIR=/workspace/results/motion-dumps,
 speak some phrases, then run on the host:
 
-    python3 lip_sync_analysis.py results/motion-dumps
+    python3 tools/lip_sync_analysis.py results/motion-dumps
 
 For each dumped phrase it cross-correlates mouth opening (first principal
 component of the lip keypoints) with the speech loudness over +-320 ms.
