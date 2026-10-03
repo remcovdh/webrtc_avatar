@@ -8,7 +8,8 @@ import unittest
 import numpy as np
 
 from avatar import server
-from avatar.server import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, PlaybackBuffer
+from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
+from avatar.tracks import keepalive_amplitude, keepalive_noise
 
 RENDER_FPS = 12.5
 
@@ -28,13 +29,6 @@ def pcm(seconds: float) -> np.ndarray:
 
 
 class AudioClockedVideoTests(unittest.TestCase):
-    def setUp(self) -> None:
-        # The timing below is written for video that is not shifted against
-        # the audio; the offset tests set their own value.
-        original = server.AVATAR_LIP_SYNC_OFFSET_MS
-        server.AVATAR_LIP_SYNC_OFFSET_MS = 0.0
-        self.addCleanup(setattr, server, "AVATAR_LIP_SYNC_OFFSET_MS", original)
-
     def test_buffered_video_plays_every_frame_in_step_with_audio(self) -> None:
         playback = PlaybackBuffer()
         playback.begin()
@@ -90,52 +84,80 @@ class AudioClockedVideoTests(unittest.TestCase):
 
 
     def test_lip_sync_offset_shows_the_mouth_later(self) -> None:
-        original = server.AVATAR_LIP_SYNC_OFFSET_MS
-        try:
-            server.AVATAR_LIP_SYNC_OFFSET_MS = 200.0
-            playback = PlaybackBuffer()
-            playback.begin()
-            playback.begin_phrase_stream(pcm(1.0), RENDER_FPS, 13)
-            playback.append_video_window(numbered_frames(0, 13))
-            play_audio(playback, 0.62)
-            # 0.62 s of audio with the mouth 0.2 s later shows the 0.42 s
-            # moment: render frame 5 (12.5 fps).
-            self.assertEqual(int(playback.next_video()[0, 0, 0]), 5)
-        finally:
-            server.AVATAR_LIP_SYNC_OFFSET_MS = original
+        playback = PlaybackBuffer(lip_sync_offset_ms=200.0)
+        playback.begin()
+        playback.begin_phrase_stream(pcm(1.0), RENDER_FPS, 13)
+        playback.append_video_window(numbered_frames(0, 13))
+        play_audio(playback, 0.62)
+        # 0.62 s of audio with the mouth 0.2 s later shows the 0.42 s
+        # moment: render frame 5 (12.5 fps).
+        self.assertEqual(int(playback.next_video()[0, 0, 0]), 5)
 
 
     def test_offset_video_tail_plays_out_after_the_voice_ends(self) -> None:
-        original = server.AVATAR_LIP_SYNC_OFFSET_MS
-        try:
-            server.AVATAR_LIP_SYNC_OFFSET_MS = 80.0
-            playback = PlaybackBuffer()
-            playback.begin()
-            # 0.8 s fills whole 20 ms chunks, so no padding hides the tail.
-            playback.begin_phrase_stream(pcm(0.8), RENDER_FPS, 10)
-            playback.append_video_window(numbered_frames(0, 10))
-            playback.finish_phrase_stream()
-            playback.finish()
-            play_audio(playback, 1.2)  # 0.8 s of speech, then silence
-            for _ in range(VIDEO_FPS):
-                playback.next_video()
-            # Without catching up, the last 80 ms of frames never became due
-            # and the request waited on `busy` forever.
-            self.assertFalse(playback.busy)
-        finally:
-            server.AVATAR_LIP_SYNC_OFFSET_MS = original
+        playback = PlaybackBuffer(lip_sync_offset_ms=80.0)
+        playback.begin()
+        # 0.8 s fills whole 20 ms chunks, so no padding hides the tail.
+        playback.begin_phrase_stream(pcm(0.8), RENDER_FPS, 10)
+        playback.append_video_window(numbered_frames(0, 10))
+        playback.finish_phrase_stream()
+        playback.finish()
+        play_audio(playback, 1.2)  # 0.8 s of speech, then silence
+        for _ in range(VIDEO_FPS):
+            playback.next_video()
+        # Without catching up, the last 80 ms of frames never became due
+        # and the request waited on `busy` forever.
+        self.assertFalse(playback.busy)
+
+    def test_audio_waits_for_the_first_video_window(self) -> None:
+        # Phrase audio is queued before the renderer has produced anything.
+        # Speech must not start on the idle image.
+        idle = IdleFrame(np.full((2, 2, 3), 99, dtype=np.uint8))
+        playback = PlaybackBuffer(idle)
+        playback.begin()
+        playback.begin_phrase_stream(pcm(1.0), RENDER_FPS, 13)
+        play_audio(playback, 0.3)
+        self.assertEqual(playback.playhead_seconds, 0.0)
+        self.assertFalse(playback.next_audio().any())
+        self.assertEqual(int(playback.next_video()[0, 0, 0]), 99)
+
+        playback.append_video_window(numbered_frames(0, 8))
+        self.assertTrue(playback.next_audio().any())
+        self.assertEqual(int(playback.next_video()[0, 0, 0]), 0)
+
+    def test_idle_image_follows_the_shared_holder(self) -> None:
+        idle = IdleFrame(np.full((2, 2, 3), 1, dtype=np.uint8))
+        playback = PlaybackBuffer(idle)
+        self.assertEqual(int(playback.next_video()[0, 0, 0]), 1)
+        idle.frame = np.full((2, 2, 3), 2, dtype=np.uint8)  # warm-up replaces it
+        self.assertEqual(int(playback.next_video()[0, 0, 0]), 2)
+
+    def test_begin_resets_every_counter(self) -> None:
+        playback = PlaybackBuffer()
+        playback.begin()
+        playback.begin_phrase_stream(pcm(0.5), RENDER_FPS, 7, render_rate=0.5)
+        playback.append_video_window(numbered_frames(0, 7))
+        play_audio(playback, 0.3)
+        playback.clear()
+        fresh = PlaybackBuffer()
+        skip = {"idle", "video", "audio", "last_video"}
+        for name, value in vars(fresh).items():
+            if name not in skip:
+                self.assertEqual(getattr(playback, name), value, name)
 
 
 class KeepaliveNoiseTests(unittest.TestCase):
     def test_silence_becomes_inaudible_noise_and_speech_is_untouched(self) -> None:
         rng = np.random.default_rng(0)
         silence = np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
-        noise = server.keepalive_noise(silence, rng)
+        amplitude = keepalive_amplitude(-60.0)
+        noise = keepalive_noise(silence, rng, amplitude)
         self.assertTrue(noise.any())
         rms_dbfs = 20 * np.log10(np.sqrt(np.mean(noise.astype(float) ** 2)) / 32767)
         self.assertLess(rms_dbfs, -55)
         speech = np.full((1, AUDIO_SAMPLES), 1000, dtype=np.int16)
-        self.assertIs(server.keepalive_noise(speech, rng), speech)
+        self.assertIs(keepalive_noise(speech, rng, amplitude), speech)
+        self.assertIs(keepalive_noise(silence, rng, keepalive_amplitude(None)), silence)
 
 
 class SpeechStartGateTests(unittest.TestCase):

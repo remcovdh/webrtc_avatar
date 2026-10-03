@@ -32,13 +32,6 @@ class FrameWindowTests(unittest.TestCase):
     def test_worker_publishes_windows_thread_safely(self) -> None:
         self.assertIn("asyncio.run_coroutine_threadsafe(", self.source)
 
-    def test_audio_starts_with_first_video_window(self) -> None:
-        self.assertIn("if self.started and self.audio:", self.source)
-        self.assertIn(
-            "# Audio and the first video window become visible atomically",
-            self.source,
-        )
-
     def test_v2j_rollback_switch_is_present(self) -> None:
         self.assertIn(
             'INCREMENTAL_FRAME_WINDOWS = SETTINGS.incremental_frame_windows',

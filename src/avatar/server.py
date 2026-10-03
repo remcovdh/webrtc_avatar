@@ -48,6 +48,9 @@ from src.utils.utils import get_rotation_matrix
 
 from avatar import config as avatar_config
 from avatar.conductor_client import ConductorClient
+from avatar.phrases import split_phrases
+from avatar.playback import AUDIO_RATE, AUDIO_SAMPLES, VIDEO_FPS, IdleFrame, PlaybackBuffer
+from avatar.tracks import AvatarAudioTrack, AvatarVideoTrack
 from avatar.listener_client import SocketListener
 from shared.listener_protocol import SAMPLE_RATE as LISTENER_SAMPLE_RATE
 from shared.listener_protocol import TranscriptEvent
@@ -163,16 +166,6 @@ AVATAR_LIP_MOTION_MODE = SETTINGS.lip_motion_mode
 # Shifts the video against the audio clock: positive shows the mouth later.
 # JoyVASA's mouth leads the loudness by ~40-160 ms (median ~80 ms).
 AVATAR_LIP_SYNC_OFFSET_MS = SETTINGS.lip_sync_offset_ms
-# During pauses the audio track sends this very quiet noise instead of digital
-# silence. Laptop audio chips power the speaker amplifier down after a few
-# seconds of silence and clip the first few hundred ms when sound resumes
-# ("Great, then we agree." was heard as "then we agree."). -60 dBFS is far
-# below anything audible in a room. "off" sends plain silence.
-AUDIO_KEEPALIVE_AMPLITUDE = (
-    0.0
-    if SETTINGS.audio_keepalive_dbfs is None
-    else 32767 * 10 ** (SETTINGS.audio_keepalive_dbfs / 20)
-)
 # FasterLivePortrait's own "eyes" and "lip" animation-region keypoints.
 EYE_EXPRESSION_INDICES = [11, 13, 15, 16, 18]
 LIP_EXPRESSION_INDICES = [6, 12, 14, 17, 19, 20]
@@ -182,9 +175,6 @@ PHRASE_MIN_FIRST_CHARS = SETTINGS.phrase_min_first_chars
 PHRASE_FIRST_TARGET_CHARS = SETTINGS.phrase_first_target_chars
 PHRASE_TARGET_CHARS = SETTINGS.phrase_target_chars
 PHRASE_MAX_CHARS = SETTINGS.phrase_max_chars
-VIDEO_FPS = 30
-AUDIO_RATE = 48_000
-AUDIO_SAMPLES = 960  # 20 ms at 48 kHz
 
 pcs: set[RTCPeerConnection] = set()
 pipeline: GradioLivePortraitPipeline | None = None
@@ -195,8 +185,6 @@ warmup_seconds: float | None = None
 warmup_metrics: dict[str, Any] = {}
 warmup_error: str | None = None
 tts_startup_wait_seconds: float | None = None
-idle_frame_source = "original-avatar"
-idle_frame_index: int | None = None
 warping_backend = "cuda"
 render_fps_estimate = EXPECTED_RENDER_FPS
 
@@ -279,7 +267,8 @@ def _load_avatar() -> np.ndarray:
     return _letterbox(image)
 
 
-BASE_AVATAR = np.zeros((512, 512, 3), dtype=np.uint8)
+# The image shown while idle; every playback buffer reads it.
+IDLE_FRAME = IdleFrame()
 
 
 _FLP_CROP_IMAGE = flp_pipeline.crop_image
@@ -400,378 +389,14 @@ def _enable_tensorrt_warping(loaded: Any) -> None:
     )
 
 
-def _split_phrases(text: str) -> list[str]:
-    """Split text into low-latency phrases without losing punctuation."""
-    normalized = " ".join(text.split())
-    if not normalized:
-        return []
-
-    phrases: list[str] = []
-    current: list[str] = []
-    current_length = 0
-    closing_marks = "\"'”’)]}"
-
-    for word in normalized.split(" "):
-        current.append(word)
-        current_length += len(word) + (1 if len(current) > 1 else 0)
-        ending = word.rstrip(closing_marks)
-        terminal = ending.endswith((".", "!", "?", ";", ":"))
-        soft_break = ending.endswith(",")
-        target = PHRASE_FIRST_TARGET_CHARS if not phrases else PHRASE_TARGET_CHARS
-
-        if (
-            terminal
-            or current_length >= PHRASE_MAX_CHARS
-            or current_length >= target
-            or (soft_break and current_length >= max(12, target // 2))
-        ):
-            phrases.append(" ".join(current))
-            current = []
-            current_length = 0
-
-    if current:
-        tail = " ".join(current)
-        if (
-            phrases
-            and len(tail) < 12
-            and len(phrases[-1]) + 1 + len(tail) <= PHRASE_MAX_CHARS
-        ):
-            phrases[-1] = f"{phrases[-1]} {tail}"
-        else:
-            phrases.append(tail)
-
-    # A tiny greeting starts quickly but exhausts its media before the next
-    # phrase can produce a video window. Merge it with phrase two to trade a
-    # small amount of initial latency for uninterrupted opening playback.
-    if (
-        MERGE_SHORT_OPENING_PHRASE
-        and len(phrases) >= 2
-        and len(phrases[0]) < PHRASE_MIN_FIRST_CHARS
-        and len(phrases[0]) + 1 + len(phrases[1]) <= PHRASE_MAX_CHARS
-    ):
-        phrases[0:2] = [f"{phrases[0]} {phrases[1]}"]
-
-    return phrases
 
 
-class PlaybackBuffer:
-    """Per-peer playback state consumed by the two WebRTC tracks.
-
-    Audio is the master clock. Every queued video frame carries its time on the
-    audio timeline, and the video track shows the frame that matches the audio
-    already played. When rendering falls behind real time the late frames are
-    skipped rather than shown late, so the mouth never drifts after the voice.
-    """
-
-    def __init__(self) -> None:
-        self.video: deque[tuple[float, np.ndarray]] = deque()
-        self.audio: deque[np.ndarray] = deque()
-        self.producing = False
-        self.started = False
-        self.last_video = BASE_AVATAR
-        self.audio_underruns = 0
-        self.video_underruns = 0
-        self.video_dropped = 0
-        self.speech_holds = 0
-        self.speech_lead_seconds = 0.0
-        self._audio_queued_samples = 0
-        self._audio_played_samples = 0
-        self._silence_samples = 0
-        self._speech_gate_samples = 0
-        self._speech_gate_open = True
-        self._stream_fps = 0.0
-        self._stream_start = 0.0
-        self._stream_source_frames = 0
-        self._stream_video_emitted = 0
-        self._stream_video_target = 0
-        self._stream_media_duration = 0.0
-        self._stream_last_frame: np.ndarray | None = None
-
-    @property
-    def busy(self) -> bool:
-        return self.producing or bool(self.video or self.audio)
-
-    @property
-    def buffered_seconds(self) -> float:
-        video_seconds = len(self.video) / VIDEO_FPS
-        audio_seconds = len(self.audio) * AUDIO_SAMPLES / AUDIO_RATE
-        return min(video_seconds, audio_seconds)
-
-    @property
-    def playhead_seconds(self) -> float:
-        return self._audio_played_samples / AUDIO_RATE
-
-    def begin(self) -> None:
-        self.clear()
-        self.producing = True
-
-    def _queue_audio(self, pcm_48k: np.ndarray, duration: float) -> float:
-        """Queue padded audio and return its start time on the audio timeline."""
-        start = self._audio_queued_samples / AUDIO_RATE
-        required_samples = max(len(pcm_48k), math.ceil(duration * AUDIO_RATE))
-        padded = np.pad(pcm_48k, (0, required_samples - len(pcm_48k)))
-        for offset in range(0, len(padded), AUDIO_SAMPLES):
-            chunk = padded[offset : offset + AUDIO_SAMPLES]
-            if len(chunk) < AUDIO_SAMPLES:
-                chunk = np.pad(chunk, (0, AUDIO_SAMPLES - len(chunk)))
-            self.audio.append(chunk.reshape(1, -1))
-            self._audio_queued_samples += AUDIO_SAMPLES
-        return start
-
-    def append(self, frames: list[np.ndarray], fps: float, pcm_24k: np.ndarray) -> float:
-        if not frames:
-            raise ValueError("The animation renderer returned no video frames")
-        if fps <= 0:
-            fps = 25.0
-
-        pcm_48k = np.repeat(pcm_24k.astype(np.int16, copy=False), 2)
-        audio_duration = len(pcm_48k) / AUDIO_RATE
-        video_duration = len(frames) / fps
-        duration = max(audio_duration, video_duration)
-
-        start = self._queue_audio(pcm_48k, duration)
-        target_count = max(1, math.ceil(duration * VIDEO_FPS))
-        video_indices = np.minimum(
-            (np.arange(target_count) * fps / VIDEO_FPS).astype(int),
-            len(frames) - 1,
-        )
-        self.video.extend(
-            (start + target_index / VIDEO_FPS, frames[index])
-            for target_index, index in enumerate(video_indices)
-        )
-        self.started = True
-        return duration
-
-    def begin_phrase_stream(
-        self,
-        pcm_24k: np.ndarray,
-        fps: float,
-        expected_rendered_frames: int,
-        render_rate: float | None = None,
-        window_seconds: float = 0.0,
-        safety: float = SPEECH_START_SAFETY,
-    ) -> float:
-        """Queue phrase audio and initialise drift-free windowed video timing.
-
-        `render_rate` is media seconds rendered per wall-clock second. Below
-        1.0 the phrase's speech is held until enough video exists that the
-        rest arrives in time. Frames only become available a whole window
-        (`window_seconds`, W) at a time; requiring each window to be complete
-        before its first frame is due gives a lead of
-        `W + (duration - W) * (1 - rate)` seconds of video.
-        """
-        if fps <= 0:
-            fps = 25.0
-        if expected_rendered_frames <= 0:
-            raise ValueError("The incremental renderer expected no video frames")
-
-        pcm_48k = np.repeat(pcm_24k.astype(np.int16, copy=False), 2)
-        audio_duration = len(pcm_48k) / AUDIO_RATE
-        video_duration = expected_rendered_frames / fps
-        duration = max(audio_duration, video_duration)
-
-        self._stream_start = self._queue_audio(pcm_48k, duration)
-        self._speech_gate_samples = round(self._stream_start * AUDIO_RATE)
-        window = min(window_seconds, duration)
-        self.speech_lead_seconds = (
-            min(
-                duration,
-                (window + (duration - window) * (1.0 - render_rate)) * safety,
-            )
-            if render_rate is not None and 0.0 < render_rate < 1.0
-            else 0.0
-        )
-        self._speech_gate_open = self.speech_lead_seconds <= 0.0
-        self._stream_fps = fps
-        self._stream_source_frames = 0
-        self._stream_video_emitted = 0
-        self._stream_video_target = max(1, math.ceil(duration * VIDEO_FPS))
-        self._stream_media_duration = duration
-        self._stream_last_frame = None
-        return duration
-
-    def _stream_time(self, target_index: int) -> float:
-        return self._stream_start + target_index / VIDEO_FPS
-
-    def append_video_window(self, frames: list[np.ndarray]) -> None:
-        """Append rendered frames while preserving resampling phase per phrase."""
-        if not frames:
-            return
-        if self._stream_fps <= 0 or self._stream_video_target <= 0:
-            raise RuntimeError("Phrase stream was not initialised")
-
-        source_start = self._stream_source_frames
-        source_end = source_start + len(frames)
-        desired = min(
-            self._stream_video_target,
-            math.ceil(source_end * VIDEO_FPS / self._stream_fps),
-        )
-        for target_index in range(self._stream_video_emitted, desired):
-            source_index = min(
-                math.floor(target_index * self._stream_fps / VIDEO_FPS),
-                source_end - 1,
-            )
-            if source_index < source_start:
-                frame = self.last_video
-            else:
-                frame = frames[source_index - source_start]
-            self.video.append((self._stream_time(target_index), frame))
-
-        self._stream_source_frames = source_end
-        self._stream_video_emitted = desired
-        self._stream_last_frame = frames[-1]
-        if self._stream_video_emitted / VIDEO_FPS >= self.speech_lead_seconds:
-            self._speech_gate_open = True
-        # Audio and the first video window become visible atomically from the
-        # event loop's perspective, so speech never starts on the idle frame.
-        self.started = True
-
-    def finish_phrase_stream(self) -> float:
-        """Pad a short video tail with its last frame and close stream state."""
-        if self._stream_video_emitted < self._stream_video_target:
-            tail_frame = self._stream_last_frame
-            if tail_frame is None:
-                raise RuntimeError("Incremental renderer produced no video frames")
-            self.video.extend(
-                (self._stream_time(target_index), tail_frame)
-                for target_index in range(
-                    self._stream_video_emitted, self._stream_video_target
-                )
-            )
-        duration = self._stream_media_duration
-        self._speech_gate_open = True
-        self._stream_fps = 0.0
-        self._stream_start = 0.0
-        self._stream_source_frames = 0
-        self._stream_video_emitted = 0
-        self._stream_video_target = 0
-        self._stream_media_duration = 0.0
-        self._stream_last_frame = None
-        return duration
-
-    def finish(self) -> None:
-        self.producing = False
-
-    def next_video(self) -> np.ndarray:
-        # The lip-sync offset shows the mouth later than the voice. While the
-        # voice is silent (after a phrase, or during a speech hold) the audio
-        # clock stops, so let the video catch up by up to the offset; otherwise
-        # the last offset's worth of frames would never become due.
-        offset = AVATAR_LIP_SYNC_OFFSET_MS / 1000
-        silence = self._silence_samples / AUDIO_RATE
-        playhead = self.playhead_seconds - offset + min(silence, max(offset, 0.0))
-        # Skip frames whose moment in the audio has already passed.
-        while len(self.video) > 1 and self.video[1][0] <= playhead:
-            self.video.popleft()
-            self.video_dropped += 1
-        if self.video:
-            frame_time, frame = self.video[0]
-            if frame_time <= playhead + 1 / VIDEO_FPS:
-                self.video.popleft()
-                self.last_video = frame
-            return self.last_video
-        if self.started and (self.producing or self.audio):
-            if self.producing:
-                self.video_underruns += 1
-            return self.last_video
-        return BASE_AVATAR
-
-    def next_audio(self) -> np.ndarray:
-        # Incremental rendering queues phrase audio before FLP has completed
-        # its first video window. Do not consume that audio until the first
-        # window atomically sets `started`; otherwise speech leads the mouth by
-        # approximately one first-window render interval.
-        if self.started and self.audio:
-            if (
-                not self._speech_gate_open
-                and self._audio_played_samples >= self._speech_gate_samples
-            ):
-                # Planned hold before a phrase; the video waits on the same
-                # clock, so both resume together once enough is rendered.
-                self.speech_holds += 1
-                self._silence_samples += AUDIO_SAMPLES
-                return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
-            self._audio_played_samples += AUDIO_SAMPLES
-            self._silence_samples = 0
-            return self.audio.popleft()
-        if self.started:
-            self._silence_samples += AUDIO_SAMPLES
-            if self.producing:
-                self.audio_underruns += 1
-        return np.zeros((1, AUDIO_SAMPLES), dtype=np.int16)
-
-    def clear(self) -> None:
-        self.video.clear()
-        self.audio.clear()
-        self.producing = False
-        self.started = False
-        self.last_video = BASE_AVATAR
-        self.audio_underruns = 0
-        self.video_underruns = 0
-        self.video_dropped = 0
-        self.speech_holds = 0
-        self.speech_lead_seconds = 0.0
-        self._audio_queued_samples = 0
-        self._audio_played_samples = 0
-        self._silence_samples = 0
-        self._speech_gate_samples = 0
-        self._speech_gate_open = True
-        self._stream_fps = 0.0
-        self._stream_start = 0.0
-        self._stream_source_frames = 0
-        self._stream_video_emitted = 0
-        self._stream_video_target = 0
-        self._stream_media_duration = 0.0
-        self._stream_last_frame = None
 
 
-class AvatarVideoTrack(VideoStreamTrack):
-    def __init__(self, playback: PlaybackBuffer) -> None:
-        super().__init__()
-        self.playback = playback
-
-    async def recv(self) -> VideoFrame:
-        pts, time_base = await self.next_timestamp()
-        frame = VideoFrame.from_ndarray(self.playback.next_video(), format="bgr24")
-        frame.pts = pts
-        frame.time_base = time_base
-        return frame
 
 
-def keepalive_noise(samples: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Replace an all-zero audio chunk with inaudible noise (see
-    AUDIO_KEEPALIVE_AMPLITUDE); real audio passes through untouched."""
-    if AUDIO_KEEPALIVE_AMPLITUDE <= 0 or samples.any():
-        return samples
-    noise = rng.normal(0.0, AUDIO_KEEPALIVE_AMPLITUDE, samples.shape)
-    return np.clip(np.round(noise), -32768, 32767).astype(np.int16)
 
 
-class AvatarAudioTrack(AudioStreamTrack):
-    def __init__(self, playback: PlaybackBuffer) -> None:
-        super().__init__()
-        self.playback = playback
-        self._start: float | None = None
-        self._timestamp = 0
-        self._rng = np.random.default_rng()
-
-    async def recv(self) -> AudioFrame:
-        if self._start is None:
-            self._start = time.time()
-        else:
-            self._timestamp += AUDIO_SAMPLES
-            target = self._start + self._timestamp / AUDIO_RATE
-            await asyncio.sleep(max(0, target - time.time()))
-
-        frame = AudioFrame.from_ndarray(
-            keepalive_noise(self.playback.next_audio(), self._rng),
-            format="s16",
-            layout="mono",
-        )
-        frame.sample_rate = AUDIO_RATE
-        frame.pts = self._timestamp
-        frame.time_base = Fraction(1, AUDIO_RATE)
-        return frame
 
 
 async def _send_event(channel: Any, event_type: str, **payload: Any) -> None:
@@ -1291,7 +916,7 @@ async def _create_clip(
         await _send_event(channel, "error", message="Wait for the current speech to finish.")
         return
 
-    phrases = _split_phrases(text)
+    phrases = split_phrases(text, SETTINGS)
     if not phrases:
         await _send_event(channel, "error", message="Enter text to speak.")
         return
@@ -1719,7 +1344,6 @@ async def _warmup_pipeline() -> None:
     """Exercise the same TTS, JoyVASA and renderer path before the first user."""
     global warmup_complete, warmup_seconds, warmup_metrics, warmup_error
     global tts_startup_wait_seconds
-    global BASE_AVATAR, idle_frame_source, idle_frame_index
     global render_fps_estimate
 
     started = time.perf_counter()
@@ -1762,9 +1386,9 @@ async def _warmup_pipeline() -> None:
                 # WebRTC must start in the same aligned, neural render space as
                 # speech. The source photograph stays hidden and is used only
                 # to initialise FasterLivePortrait.
-                BASE_AVATAR = frames[selected_index].copy()
-                idle_frame_source = "startup-warmup-neural-frame"
-                idle_frame_index = selected_index
+                IDLE_FRAME.frame = frames[selected_index].copy()
+                IDLE_FRAME.source = "startup-warmup-neural-frame"
+                IDLE_FRAME.index = selected_index
                 LOG.info(
                     "Neural idle frame prepared from warm-up frame %d/%d",
                     selected_index,
@@ -1776,8 +1400,8 @@ async def _warmup_pipeline() -> None:
                 "tts": tts_detail,
                 "voice_mode": warmup_voice.mode,
                 "render": render_detail,
-                "idle_frame_source": idle_frame_source,
-                "idle_frame_index": idle_frame_index,
+                "idle_frame_source": IDLE_FRAME.source,
+                "idle_frame_index": IDLE_FRAME.index,
                 "media_seconds": round(
                     max(len(pcm) / 24_000, len(frames) / max(fps, 1.0)),
                     3,
@@ -1810,9 +1434,9 @@ async def _warmup_pipeline() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global BASE_AVATAR, pipeline, startup_error
+    global pipeline, startup_error
     try:
-        BASE_AVATAR = _load_avatar()
+        IDLE_FRAME.frame = _load_avatar()
         LOG.info("Loading FasterLivePortrait and source portrait")
         pipeline = await asyncio.to_thread(_initialize_pipeline)
         await _warmup_pipeline()
@@ -1874,8 +1498,8 @@ async def health() -> JSONResponse:
         "startup_warmup_metrics": warmup_metrics,
         "startup_warmup_error": warmup_error,
         "neural_idle_frame_enabled": USE_NEURAL_IDLE_FRAME,
-        "idle_frame_source": idle_frame_source,
-        "idle_frame_index": idle_frame_index,
+        "idle_frame_source": IDLE_FRAME.source,
+        "idle_frame_index": IDLE_FRAME.index,
         "tts_startup_wait_seconds": (
             round(tts_startup_wait_seconds, 3)
             if tts_startup_wait_seconds is not None
@@ -1966,7 +1590,9 @@ async def offer(request: Request) -> JSONResponse:
 
     pc = RTCPeerConnection()
     pcs.add(pc)
-    playback = PlaybackBuffer()
+    playback = PlaybackBuffer(
+        IDLE_FRAME, SETTINGS.lip_sync_offset_ms, SETTINGS.speech_start_safety
+    )
     jobs: set[asyncio.Task[Any]] = set()
     peer_channel: dict[str, Any] = {}
     listener = SocketListener(LISTENER_SOCKET) if LISTENER_SOCKET else None
@@ -2163,7 +1789,10 @@ async def offer(request: Request) -> JSONResponse:
     # aiortc gives every sender its own random msid stream, and browsers only
     # lip-sync (via RTCP sender reports) tracks that share one stream.
     stream_id = str(uuid.uuid4())
-    for track in (AvatarVideoTrack(playback), AvatarAudioTrack(playback)):
+    for track in (
+        AvatarVideoTrack(playback),
+        AvatarAudioTrack(playback, SETTINGS.audio_keepalive_dbfs),
+    ):
         pc.addTrack(track)._stream_id = stream_id
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
