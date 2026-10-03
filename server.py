@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import shutil
 import tempfile
 import time
@@ -47,6 +46,7 @@ import src.pipelines.faster_live_portrait_pipeline as flp_pipeline
 from src.pipelines.gradio_live_portrait_pipeline import GradioLivePortraitPipeline
 from src.utils.utils import get_rotation_matrix
 
+import avatar_config
 from conductor_client import ConductorClient
 from listener_client import SocketListener
 from listener_protocol import SAMPLE_RATE as LISTENER_SAMPLE_RATE
@@ -56,162 +56,132 @@ from src.pipelines.joyvasa_audio_to_motion_pipeline import (
 )
 
 LOG = logging.getLogger("avatar")
-SERVER_BUILD = "neural-avatar-v2w-jevk5-review"
+SERVER_BUILD = "neural-avatar-v2x-config"
+
+# All settings come from avatar_config (defaults, profiles, validation). The
+# module constants below are that one loaded configuration under the names the
+# rest of this file uses.
+CONFIG = avatar_config.load()
+SETTINGS = CONFIG.settings
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=SETTINGS.log_level.upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
+LOG.info(
+    "Configuration: profile=%s hash=%s overrides=%s",
+    CONFIG.profile,
+    CONFIG.config_hash,
+    CONFIG.summary()["config_overrides"] or "none",
+)
+if CONFIG.experiment:
+    LOG.warning("EXPERIMENT RUN: a diagnosis or rollback switch is overridden")
+for _warning in CONFIG.warnings:
+    LOG.warning("Configuration: %s", _warning)
 
 ROOT = Path(__file__).resolve().parent
-AVATAR_PATH = Path(os.getenv("AVATAR_PATH", "/workspace/inputs/avatar.jpg"))
-CONFIG_PATH = Path(
-    os.getenv(
-        "FLP_CONFIG_PATH",
-        "/workspace/FasterLivePortrait/configs/onnx_infer.yaml",
-    )
-)
-RESULTS_ROOT = Path(os.getenv("RESULTS_ROOT", "/workspace/results"))
+AVATAR_PATH = Path(SETTINGS.image_path)
+CONFIG_PATH = Path(SETTINGS.flp_config_path)
+RESULTS_ROOT = Path(SETTINGS.results_root)
 # Chatterbox behind chatterbox_api.py is the only TTS provider.
 TTS_PROVIDER = "chatterbox"
-TTS_URL = os.getenv("TTS_URL", "http://127.0.0.1:7860").rstrip("/")
+TTS_URL = SETTINGS.tts_url.rstrip("/")
 TTS_HEALTH_PATH = "/health"
 # Reference recording for the cloned voice (preset-clone mode).
-TTS_PRESET_AUDIO_PATH = Path(
-    os.getenv("TTS_PRESET_AUDIO_PATH", "/workspace/inputs/voice-preset.wav")
-)
-TTS_DEFAULT_VOICE_MODE = os.getenv(
-    "TTS_DEFAULT_VOICE_MODE", "preset-clone"
-).strip().lower()
+TTS_PRESET_AUDIO_PATH = Path(SETTINGS.preset_audio_path)
+TTS_DEFAULT_VOICE_MODE = SETTINGS.default_voice_mode
 TTS_SEED = 42
 # Guidance scale of JoyVASA's audio-to-motion diffusion.
 JOYVASA_CFG_SCALE = 2.8
 MAX_TEXT_LENGTH = 500
-INCREMENTAL_FRAME_WINDOWS = _env_bool("INCREMENTAL_FRAME_WINDOWS", True)
-RENDER_WINDOW_FRAMES = max(1, int(os.getenv("RENDER_WINDOW_FRAMES", "8")))
-RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
-ADAPTIVE_RENDER_STRIDE = _env_bool("ADAPTIVE_RENDER_STRIDE", True)
-CATCHUP_RENDER_STRIDE = max(
-    RENDER_STRIDE, int(os.getenv("CATCHUP_RENDER_STRIDE", "3"))
-)
-CATCHUP_BUFFER_SECONDS = max(
-    0.0, float(os.getenv("CATCHUP_BUFFER_SECONDS", "0.75"))
-)
-# FLP renders slower than real time on this GPU. Rather than letting the
-# mouth fall behind the voice (or skipping frames to catch up), hold each
-# phrase's speech until enough video is rendered that the rest arrives in time.
-SPEECH_START_GATE = _env_bool("SPEECH_START_GATE", True)
+INCREMENTAL_FRAME_WINDOWS = SETTINGS.incremental_frame_windows
+RENDER_WINDOW_FRAMES = SETTINGS.render_window_frames
+RENDER_STRIDE = SETTINGS.render_stride
+ADAPTIVE_RENDER_STRIDE = SETTINGS.adaptive_render_stride
+CATCHUP_RENDER_STRIDE = SETTINGS.catchup_render_stride
+CATCHUP_BUFFER_SECONDS = SETTINGS.catchup_buffer_seconds
+# FLP can render slower than real time. Rather than letting the mouth fall
+# behind the voice (or skipping frames to catch up), hold each phrase's speech
+# until enough video is rendered that the rest arrives in time.
+SPEECH_START_GATE = SETTINGS.speech_start_gate
 # Initial rendered-frames-per-second estimate; replaced by measurements.
-EXPECTED_RENDER_FPS = max(0.1, float(os.getenv("EXPECTED_RENDER_FPS", "9.0")))
-SPEECH_START_SAFETY = max(1.0, float(os.getenv("SPEECH_START_SAFETY", "1.15")))
+EXPECTED_RENDER_FPS = SETTINGS.expected_render_fps
+SPEECH_START_SAFETY = SETTINGS.speech_start_safety
 # Render FLP's warping_spade (the per-frame bottleneck) through ONNX Runtime's
 # TensorRT provider in FP16: ~27 ms instead of ~97 ms per frame on the RTX
 # 5080. Engines are cached, so only the first start spends ~30 s building.
-AVATAR_TENSORRT = _env_bool("AVATAR_TENSORRT", False)
-TENSORRT_CACHE_DIR = os.getenv("AVATAR_TENSORRT_CACHE", "/workspace/trt-cache")
+AVATAR_TENSORRT = SETTINGS.tensorrt
+TENSORRT_CACHE_DIR = SETTINGS.tensorrt_cache
 # Unix socket of listener_worker.py (VAD + streaming ASR + diarization). Empty
 # disables listening; the avatar then works as before.
-LISTENER_SOCKET = os.getenv("LISTENER_SOCKET", "").strip()
+LISTENER_SOCKET = SETTINGS.listener_socket.strip()
 # Unix socket of conductor.py, which owns the conversation (turn-taking,
 # replies, logging). Empty disables it; typed text still works.
-CONDUCTOR_SOCKET = os.getenv("CONDUCTOR_SOCKET", "").strip()
+CONDUCTOR_SOCKET = SETTINGS.conductor_socket.strip()
 # When set, every rendered phrase saves its WAV and JoyVASA motion here so
 # motion problems can be analysed offline.
-DEBUG_DUMP_DIR = os.getenv("AVATAR_DEBUG_DUMP_DIR", "").strip()
+DEBUG_DUMP_DIR = SETTINGS.debug_dump_dir.strip()
 # Spoken once at startup so the first user request finds every model loaded;
 # its first frame also becomes the idle image.
 WARMUP_TEXT = "Hello."
-USE_NEURAL_IDLE_FRAME = _env_bool("USE_NEURAL_IDLE_FRAME", True)
-WARMUP_IDLE_FRAME_INDEX = int(os.getenv("WARMUP_IDLE_FRAME_INDEX", "0"))
+USE_NEURAL_IDLE_FRAME = SETTINGS.use_neural_idle_frame
+WARMUP_IDLE_FRAME_INDEX = SETTINGS.warmup_idle_frame_index
 # How long the warm-up waits for the TTS service, and how often it checks.
 TTS_STARTUP_WAIT_SECONDS = 300.0
 TTS_STARTUP_POLL_SECONDS = 2.0
-TTS_PREFETCH = _env_bool("TTS_PREFETCH", False)
-TTS_PREFETCH_POLICY = os.getenv("TTS_PREFETCH_POLICY", "adaptive").strip().lower()
-if TTS_PREFETCH_POLICY not in {"adaptive", "eager"}:
-    raise ValueError("TTS_PREFETCH_POLICY must be adaptive or eager")
-TTS_PREFETCH_MIN_BUFFER_SECONDS = max(
-    0.0, float(os.getenv("TTS_PREFETCH_MIN_BUFFER_SECONDS", "0.50"))
-)
-PERSISTENT_PHRASE_MOTION = _env_bool("PERSISTENT_PHRASE_MOTION", True)
-AVATAR_RELATIVE_MOTION = _env_bool("AVATAR_RELATIVE_MOTION", True)
-AVATAR_ANIMATION_REGION = os.getenv("AVATAR_ANIMATION_REGION", "all").strip().lower()
-if AVATAR_ANIMATION_REGION not in {"all", "exp", "pose", "lip", "eyes"}:
-    raise ValueError(
-        "AVATAR_ANIMATION_REGION must be one of: all, exp, pose, lip, eyes"
-    )
-AVATAR_DRIVING_MULTIPLIER = float(os.getenv("AVATAR_DRIVING_MULTIPLIER", "1.0"))
-if not 0.0 <= AVATAR_DRIVING_MULTIPLIER <= 2.0:
-    raise ValueError("AVATAR_DRIVING_MULTIPLIER must be between 0.0 and 2.0")
-AVATAR_NORMALIZE_LIP = _env_bool("AVATAR_NORMALIZE_LIP", True)
-AVATAR_EYE_RETARGETING = _env_bool("AVATAR_EYE_RETARGETING", False)
+TTS_PREFETCH = SETTINGS.tts_prefetch
+TTS_PREFETCH_POLICY = SETTINGS.tts_prefetch_policy
+TTS_PREFETCH_MIN_BUFFER_SECONDS = SETTINGS.tts_prefetch_min_buffer_seconds
+PERSISTENT_PHRASE_MOTION = SETTINGS.persistent_phrase_motion
+AVATAR_RELATIVE_MOTION = SETTINGS.relative_motion
+AVATAR_ANIMATION_REGION = SETTINGS.animation_region
+AVATAR_DRIVING_MULTIPLIER = SETTINGS.driving_multiplier
+AVATAR_NORMALIZE_LIP = SETTINGS.normalize_lip
+AVATAR_EYE_RETARGETING = SETTINGS.eye_retargeting
 # Scales JoyVASA's eye keypoint motion relative to the utterance's first
 # frame without touching mouth, brow or head motion: 1.0 keeps the generated
 # motion, 0.0 keeps the portrait's own eyes (no gaze drift, but no blinks).
-AVATAR_EYE_MOTION_SCALE = float(os.getenv("AVATAR_EYE_MOTION_SCALE", "1.0"))
-if not 0.0 <= AVATAR_EYE_MOTION_SCALE <= 1.5:
-    raise ValueError("AVATAR_EYE_MOTION_SCALE must be between 0.0 and 1.5")
+AVATAR_EYE_MOTION_SCALE = SETTINGS.eye_motion_scale
 # Scales JoyVASA's mouth keypoint motion the same way. Above 1.0 opens the
 # mouth further for the same audio without amplifying eyes or head motion.
-AVATAR_LIP_MOTION_SCALE = float(os.getenv("AVATAR_LIP_MOTION_SCALE", "1.0"))
-if not 0.0 <= AVATAR_LIP_MOTION_SCALE <= 2.0:
-    raise ValueError("AVATAR_LIP_MOTION_SCALE must be between 0.0 and 2.0")
+AVATAR_LIP_MOTION_SCALE = SETTINGS.lip_motion_scale
 # Scales JoyVASA's head rotation and translation around the utterance's first
 # pose. Its pitch drifted 1-5 degrees upwards and roll up to 5 degrees during
 # speech, so the avatar looked above the camera with a tilted frame.
-AVATAR_HEAD_MOTION_SCALE = float(os.getenv("AVATAR_HEAD_MOTION_SCALE", "1.0"))
-if not 0.0 <= AVATAR_HEAD_MOTION_SCALE <= 1.5:
-    raise ValueError("AVATAR_HEAD_MOTION_SCALE must be between 0.0 and 1.5")
+AVATAR_HEAD_MOTION_SCALE = SETTINGS.head_motion_scale
 # FLP rotates the source crop so the face is upright. With a slightly tilted
 # face that turned the whole output frame, with black wedges where the crop
 # left the photo. FLP never passes its own flag_do_rot to crop_image, so the
 # server sets it (see _crop_source_image). false keeps the crop upright and
 # the face keeps its own tilt.
-AVATAR_CROP_ROTATION = _env_bool("AVATAR_CROP_ROTATION", False)
+AVATAR_CROP_ROTATION = SETTINGS.crop_rotation
 # How JoyVASA's mouth keypoints reach the portrait. `relative` applies their
 # change since the utterance's first frame to the portrait's own closed-smile
 # lips, which pressed and sucked the lips in; `absolute` uses JoyVASA's mouth
 # shapes directly while eyes and head stay relative. The lip motion scale only
 # applies in relative mode.
-AVATAR_LIP_MOTION_MODE = os.getenv("AVATAR_LIP_MOTION_MODE", "absolute").strip().lower()
-if AVATAR_LIP_MOTION_MODE not in {"absolute", "relative"}:
-    raise ValueError("AVATAR_LIP_MOTION_MODE must be absolute or relative")
+AVATAR_LIP_MOTION_MODE = SETTINGS.lip_motion_mode
 # Shifts the video against the audio clock: positive shows the mouth later.
 # JoyVASA's mouth leads the loudness by ~40-160 ms (median ~80 ms).
-AVATAR_LIP_SYNC_OFFSET_MS = float(os.getenv("AVATAR_LIP_SYNC_OFFSET_MS", "0"))
-if not -500.0 <= AVATAR_LIP_SYNC_OFFSET_MS <= 500.0:
-    raise ValueError("AVATAR_LIP_SYNC_OFFSET_MS must be between -500 and 500")
+AVATAR_LIP_SYNC_OFFSET_MS = SETTINGS.lip_sync_offset_ms
 # During pauses the audio track sends this very quiet noise instead of digital
 # silence. Laptop audio chips power the speaker amplifier down after a few
 # seconds of silence and clip the first few hundred ms when sound resumes
 # ("Great, then we agree." was heard as "then we agree."). -60 dBFS is far
 # below anything audible in a room. "off" sends plain silence.
-_KEEPALIVE = os.getenv("AVATAR_AUDIO_KEEPALIVE_DBFS", "-60").strip().lower()
 AUDIO_KEEPALIVE_AMPLITUDE = (
-    0.0 if _KEEPALIVE in {"off", "none", ""} else 32767 * 10 ** (float(_KEEPALIVE) / 20)
+    0.0
+    if SETTINGS.audio_keepalive_dbfs is None
+    else 32767 * 10 ** (SETTINGS.audio_keepalive_dbfs / 20)
 )
 # FasterLivePortrait's own "eyes" and "lip" animation-region keypoints.
 EYE_EXPRESSION_INDICES = [11, 13, 15, 16, 18]
 LIP_EXPRESSION_INDICES = [6, 12, 14, 17, 19, 20]
-AVATAR_LIP_RETARGETING = _env_bool("AVATAR_LIP_RETARGETING", False)
-MERGE_SHORT_OPENING_PHRASE = _env_bool("MERGE_SHORT_OPENING_PHRASE", True)
-PHRASE_MIN_FIRST_CHARS = max(
-    1, int(os.getenv("PHRASE_MIN_FIRST_CHARS", "24"))
-)
-PHRASE_FIRST_TARGET_CHARS = max(
-    8, int(os.getenv("PHRASE_FIRST_TARGET_CHARS", "48"))
-)
-PHRASE_TARGET_CHARS = max(16, int(os.getenv("PHRASE_TARGET_CHARS", "100")))
-PHRASE_MAX_CHARS = max(
-    PHRASE_TARGET_CHARS, int(os.getenv("PHRASE_MAX_CHARS", "160"))
-)
+AVATAR_LIP_RETARGETING = SETTINGS.lip_retargeting
+MERGE_SHORT_OPENING_PHRASE = SETTINGS.merge_short_opening_phrase
+PHRASE_MIN_FIRST_CHARS = SETTINGS.phrase_min_first_chars
+PHRASE_FIRST_TARGET_CHARS = SETTINGS.phrase_first_target_chars
+PHRASE_TARGET_CHARS = SETTINGS.phrase_target_chars
+PHRASE_MAX_CHARS = SETTINGS.phrase_max_chars
 VIDEO_FPS = 30
 AUDIO_RATE = 48_000
 AUDIO_SAMPLES = 960  # 20 ms at 48 kHz
@@ -987,7 +957,7 @@ def _render_animation(
     if pipeline.is_source_video:
         raise RuntimeError("Direct-memory rendering currently requires a source image")
 
-    selected_stride = max(1, render_stride or RENDER_STRIDE)
+    selected_stride = render_stride or RENDER_STRIDE
     render_started = time.perf_counter()
     _ensure_joyvasa_pipeline()
     assert pipeline.joyvasa_pipe is not None
@@ -1879,6 +1849,7 @@ async def health() -> JSONResponse:
     preset_configured, preset_problem = _preset_configuration()
     body = {
         "server_build": SERVER_BUILD,
+        **CONFIG.summary(),
         "ok": startup_error is None and tts_ready,
         "avatar_ready": startup_error is None,
         "tts_ready": tts_ready,
@@ -1925,7 +1896,7 @@ async def health() -> JSONResponse:
         "lip_motion_mode": AVATAR_LIP_MOTION_MODE,
         "head_motion_scale": AVATAR_HEAD_MOTION_SCALE,
         "lip_sync_offset_ms": AVATAR_LIP_SYNC_OFFSET_MS,
-        "audio_keepalive_dbfs": _KEEPALIVE,
+        "audio_keepalive_dbfs": SETTINGS.audio_keepalive_dbfs,
         "listener_enabled": bool(LISTENER_SOCKET),
         "conductor_enabled": bool(CONDUCTOR_SOCKET),
         "crop_rotation": AVATAR_CROP_ROTATION,
@@ -1950,13 +1921,7 @@ async def health() -> JSONResponse:
 
 @app.get("/client-config")
 async def client_config() -> JSONResponse:
-    raw = os.getenv("ICE_SERVERS_JSON", "[]")
-    try:
-        ice_servers = json.loads(raw)
-        if not isinstance(ice_servers, list):
-            raise ValueError
-    except (json.JSONDecodeError, ValueError):
-        raise HTTPException(500, "ICE_SERVERS_JSON must be a JSON array")
+    ice_servers = json.loads(SETTINGS.ice_servers_json)
     preset_configured, preset_problem = _preset_configuration()
     default_mode = TTS_DEFAULT_VOICE_MODE
     if default_mode not in VOICE_MODES:
@@ -2005,7 +1970,14 @@ async def offer(request: Request) -> JSONResponse:
     jobs: set[asyncio.Task[Any]] = set()
     peer_channel: dict[str, Any] = {}
     listener = SocketListener(LISTENER_SOCKET) if LISTENER_SOCKET else None
-    conductor = ConductorClient(CONDUCTOR_SOCKET) if CONDUCTOR_SOCKET else None
+    conductor = (
+        ConductorClient(
+            CONDUCTOR_SOCKET,
+            avatar_config={"server_build": SERVER_BUILD, **CONFIG.summary()},
+        )
+        if CONDUCTOR_SOCKET
+        else None
+    )
 
     def run_job(coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)

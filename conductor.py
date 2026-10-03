@@ -41,6 +41,12 @@ PTT_FINAL_WAIT_MS = int(os.getenv("PTT_FINAL_WAIT_MS", "1500"))
 # "system1" = System 1 reactions + System 2 answers; "echo" = the M2 echo.
 RESPONDER = os.getenv("CONDUCTOR_RESPONDER", "system1").strip().lower()
 SYSTEM2_ENABLED = os.getenv("SYSTEM2_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+if LISTENER_SILENCE_MS >= min(TURN_SILENCE_MS, TURN_END_PUNCTUATION_MS, TURN_CONNECTIVE_MS):
+    raise ValueError(
+        f"LISTENER_MIN_SILENCE_MS={LISTENER_SILENCE_MS} must be smaller than "
+        "TURN_SILENCE_MS, TURN_END_PUNCTUATION_MS and TURN_CONNECTIVE_MS: the "
+        "listener's silence is part of every turn-ending silence"
+    )
 CONNECTIVES = {
     word.strip().lower()
     for word in os.getenv(
@@ -328,6 +334,12 @@ class Session:
             self.language = str(message.get("language") or "en-US")
         elif kind == "correction":
             await self._correct(message)
+        elif kind == "avatar_config":
+            self.log.write({
+                "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "session": self.id,
+                "avatar_config": {k: v for k, v in message.items() if k != "type"},
+            })
         await self._update_state()
 
     async def _correct(self, message: dict[str, Any]) -> None:

@@ -36,7 +36,7 @@ class VisualQualitySourceTests(unittest.TestCase):
             "AVATAR_LIP_RETARGETING",
         ]:
             with self.subTest(name=name):
-                self.assertIn(f'{name}: "${{{name}:-', self.compose)
+                self.assertIn(f"      - {name}\n", self.compose)
 
     def test_benchmark_can_record_each_run(self) -> None:
         self.assertIn("from aiortc.contrib.media import MediaRecorder", self.benchmark)
@@ -45,10 +45,8 @@ class VisualQualitySourceTests(unittest.TestCase):
 
     def test_quality_profiles_separate_runtime_from_stride_one(self) -> None:
         self.assertIn("QUALITY_BENCHMARK_PROFILE:-runtime", self.quality_runner)
-        self.assertIn("render_stride=2", self.quality_runner)
-        self.assertIn("incremental_windows=true", self.quality_runner)
-        self.assertIn("render_stride=1", self.quality_runner)
-        self.assertIn("incremental_windows=false", self.quality_runner)
+        self.assertIn('avatar_profile="benchmark-${quality_profile}"', self.quality_runner)
+        self.assertIn('AVATAR_PROFILE="${avatar_profile}"', self.quality_runner)
 
 
 if __name__ == "__main__":

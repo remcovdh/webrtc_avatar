@@ -7,9 +7,9 @@ cd "${project_root}"
 benchmark_repeats="${BENCHMARK_REPEATS:-3}"
 benchmark_warmups="${BENCHMARK_WARMUPS:-1}"
 benchmark_modes="${BENCHMARK_MODES:-design,preset-clone}"
-benchmark_render_strides="${BENCHMARK_RENDER_STRIDES:-2}"
+benchmark_render_strides="${BENCHMARK_RENDER_STRIDES:-1}"
 benchmark_adaptive_values="${BENCHMARK_ADAPTIVE_VALUES:-true}"
-benchmark_catchup_stride="${BENCHMARK_CATCHUP_STRIDE:-3}"
+benchmark_catchup_stride="${BENCHMARK_CATCHUP_STRIDE:-2}"
 benchmark_catchup_buffer_seconds="${BENCHMARK_CATCHUP_BUFFER_SECONDS:-0.75}"
 benchmark_prefetch_values="${BENCHMARK_PREFETCH_VALUES:-false}"
 regenerate_preset="${REGENERATE_PRESET:-0}"
@@ -70,6 +70,7 @@ for render_stride in ${benchmark_render_strides}; do
       fi
       scenario="stride-${render_stride}_adaptive-${adaptive_stride}_catchup-${benchmark_catchup_stride}_prefetch-${tts_prefetch}"
       echo "[benchmark] Starting ${scenario}"
+      AVATAR_PROFILE=benchmark-runtime \
       AVATAR_RENDER_STRIDE="${render_stride}" \
       AVATAR_ADAPTIVE_RENDER_STRIDE="${adaptive_stride}" \
       AVATAR_CATCHUP_RENDER_STRIDE="${benchmark_catchup_stride}" \

@@ -12,15 +12,15 @@ import os
 
 import uvicorn
 
-from server import app
+from server import SETTINGS, app
 
 
 async def main() -> None:
     http = uvicorn.Server(
-        uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+        uvicorn.Config(app, host="0.0.0.0", port=SETTINGS.port)
     )
     servers = [http.serve()]
-    https_port = os.getenv("HTTPS_PORT", "").strip()
+    https_port = SETTINGS.https_port.strip()
     if https_port:
         https = uvicorn.Server(
             uvicorn.Config(

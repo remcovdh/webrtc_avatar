@@ -40,8 +40,10 @@ download_models() {
 # It covers the host's IP addresses plus localhost and is regenerated when that
 # list changes, e.g. after the VM gets a new address.
 ensure_https_certificate() {
-  local cert_dir="${HTTPS_CERT_DIR:-/workspace/certs}"
-  local hosts="${HTTPS_CERT_HOSTS:-$(hostname -I 2>/dev/null) 127.0.0.1 localhost}"
+  local cert_dir hosts
+  cert_dir="$(python avatar_config.py get https_cert_dir)"
+  hosts="$(python avatar_config.py get https_cert_hosts)"
+  hosts="${hosts:-$(hostname -I 2>/dev/null) 127.0.0.1 localhost}"
   local san="" host
   for host in ${hosts}; do
     if [[ "${host}" =~ ^[0-9.]+$ || "${host}" == *:* ]]; then
@@ -69,7 +71,9 @@ case "${mode}" in
     ;;
   serve)
     cd "${flp_root}"
-    if [[ -n "${HTTPS_PORT:-}" ]]; then
+    # Also stops here, with the list of problems, on an invalid configuration.
+    https_port="$(python avatar_config.py get https_port)"
+    if [[ -n "${https_port}" ]]; then
       ensure_https_certificate
     fi
     exec python serve.py

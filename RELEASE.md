@@ -1,3 +1,36 @@
+# neural-avatar-v2x-config
+
+## v2X one configuration
+
+- `avatar_config.py` is the single source of the avatar's settings: defaults
+  (the tested live setup), profiles (`live`, `development`,
+  `benchmark-runtime`, `benchmark-visual`) and validation. Before, defaults
+  lived in the code, in Compose, in `.env.example` and in the local `.env`, and
+  disagreed (stride 2 vs 1, TensorRT off vs on, lip offset 0 vs 80 ms, ...).
+- One name per setting, `AVATAR_...`, the same on the host and in the
+  container. Compose passes settings on and holds no values. An old name stops
+  the avatar with a message naming the new one.
+- Start-up validation instead of silent correction: unknown names, values out
+  of range and impossible combinations (catch-up stride below the render
+  stride, phrase maximum below the target) are errors; a setting that cannot
+  have an effect is a warning. The conductor checks that the listener's
+  silence is shorter than the turn-ending silences.
+- `/health`, benchmark results and conversation logs carry the profile, the
+  overrides and a configuration hash; a changed diagnosis switch marks the run
+  as an experiment.
+- Removed: Breeze TTS (Docker target, benchmark scripts, voice direction, CFG
+  scales, preset transcript, `preset-direction` mode), the dead flags
+  `AVATAR_PASTE_BACK`, `DIRECT_MEMORY_RENDER`, `PROGRESSIVE_PHRASE_MODE` with
+  the legacy MP4 renderer, and nine never-varied settings (now constants).
+- `benchmark-runtime` now measures the live render path (stride 1 with
+  catch-up 2); it used stride 2, so new results are not comparable with old
+  ones. `benchmark.sh` defaults follow.
+- New tools: `tools/config_snapshot.py` (running stack against a reference),
+  `tools/run_tests.sh` (avatar tests on the working tree without a rebuild).
+  `test_avatar_config.py` covers profiles, invalid combinations and the
+  Compose pass-through; it needs no GPU.
+- `CONFIG.md` describes every setting.
+
 # neural-avatar-v2w-jevk5-review
 
 ## v2W JevK5 System 1 and the conversation review (milestone M5)

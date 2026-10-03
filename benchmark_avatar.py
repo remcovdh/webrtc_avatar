@@ -676,6 +676,11 @@ def compare_results(args: argparse.Namespace) -> int:
                     "scenario": report_path.parent.parent.name,
                     "run_directory": report_path.parent.name,
                     "server_build": health.get("server_build"),
+                    "profile": health.get("profile"),
+                    "config_hash": health.get("config_hash"),
+                    "config_overrides": json.dumps(
+                        health.get("config_overrides") or {}, sort_keys=True
+                    ),
                     "render_stride": health.get("render_stride"),
                     "adaptive_render_stride": health.get("adaptive_render_stride"),
                     "catchup_render_stride": health.get("catchup_render_stride"),

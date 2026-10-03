@@ -25,18 +25,20 @@ services:
       dockerfile: Dockerfile
       target: chatterbox
       args:
-        CHATTERBOX_VERSION: "${CHATTERBOX_VERSION:-0.1.7}"
+        - CHATTERBOX_VERSION
     image: neural-avatar-tts-chatterbox:latest
     command: ["chatterbox"]
     network_mode: host
     gpus: all
     shm_size: 4gb
+    # Passed on from the shell or .env; the defaults are in the code (CONFIG.md).
     environment:
-      CHATTERBOX_VARIANT: "${CHATTERBOX_VARIANT:-turbo}"
-      CHATTERBOX_DEVICE: "${CHATTERBOX_DEVICE:-cuda}"
-      CHATTERBOX_LANGUAGE: "${CHATTERBOX_LANGUAGE:-en}"
-      CHATTERBOX_EXAGGERATION: "${CHATTERBOX_EXAGGERATION:-0.5}"
-      CHATTERBOX_CFG_WEIGHT: "${CHATTERBOX_CFG_WEIGHT:-0.5}"
+      - CHATTERBOX_VARIANT
+      - CHATTERBOX_DEVICE
+      - CHATTERBOX_LANGUAGE
+      - CHATTERBOX_EXAGGERATION
+      - CHATTERBOX_CFG_WEIGHT
+      - LOG_LEVEL
     volumes:
       - ./models:/workspace/models
       - ./models/chatterbox-cache:/root/.cache/huggingface
@@ -59,13 +61,21 @@ services:
       target: listener
     image: neural-avatar-listener:latest
     gpus: all
+    # Passed on from the shell or .env; the defaults are in the code (CONFIG.md).
+    # LISTENER_SAVE_AUDIO=true keeps each utterance's audio next to the
+    # conversation log (opt-in).
     environment:
-      LISTENER_SOCKET: /run/avatar/listener.sock
-      LISTENER_ASR_LOOKAHEAD: "${LISTENER_ASR_LOOKAHEAD:-3}"
-      LISTENER_DIAR_MODE: "${LISTENER_DIAR_MODE:-very_low_latency}"
-      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
-      # Opt-in: keep each utterance's audio next to the conversation log.
-      LISTENER_SAVE_AUDIO: "${LISTENER_SAVE_AUDIO:-false}"
+      - LISTENER_ASR_MODEL
+      - LISTENER_DIAR_MODEL
+      - LISTENER_ASR_LOOKAHEAD
+      - LISTENER_ASR_LANGUAGE
+      - LISTENER_DIAR_MODE
+      - LISTENER_VAD_THRESHOLD
+      - LISTENER_MIN_SILENCE_MS
+      - LISTENER_PREROLL_MS
+      - LISTENER_FLUSH_MS
+      - LISTENER_SAVE_AUDIO
+      - LOG_LEVEL
     volumes:
       - avatar-run:/run/avatar
       - ./models/hf-listener:/root/.cache/huggingface
@@ -82,26 +92,28 @@ services:
     image: neural-avatar-conductor:latest
     # System 2's small LLM runs in-process with llama.cpp on the GPU.
     gpus: all
+    # Passed on from the shell or .env; the defaults are in the code (CONFIG.md).
+    # Turn-taking: TURN_END_PUNCTUATION_MS / TURN_SILENCE_MS /
+    # TURN_CONNECTIVE_MS of silence end the user's turn. System 1 (JevK5)
+    # takes its classes and reactions from config/system1.json; System 2
+    # answers from ./knowledge. CONDUCTOR_RESPONDER=echo is the M2 echo.
     environment:
-      CONDUCTOR_SOCKET: /run/avatar/conductor.sock
-      # Silence that ends the user's turn: ends in ?/./! / otherwise / after a
-      # connective ("and", "maar", ...). LISTENER_MIN_SILENCE_MS is subtracted.
-      TURN_END_PUNCTUATION_MS: "${TURN_END_PUNCTUATION_MS:-400}"
-      TURN_SILENCE_MS: "${TURN_SILENCE_MS:-700}"
-      TURN_CONNECTIVE_MS: "${TURN_CONNECTIVE_MS:-1200}"
-      LISTENER_MIN_SILENCE_MS: "${LISTENER_MIN_SILENCE_MS:-300}"
-      # System 1: JevK5 v0.3 4B decisions on the GPU (replaced Laya), classes
-      # and reactions in config/system1.json, corrections in results/system1/.
-      # "echo" = the M2 echo responder.
-      CONDUCTOR_RESPONDER: "${CONDUCTOR_RESPONDER:-system1}"
-      SYSTEM1_CONFIG: /workspace/config/system1.json
-      SYSTEM1_MEMORY: /workspace/results/system1/corrections.jsonl
-      SYSTEM1_MODEL: "${SYSTEM1_MODEL:-alibiserikbay/JevK5-GGUF::jevk5-4b-v0.3-Q4_K_M.gguf}"
-      # M4: System 2 answers questions from ./knowledge (Markdown, re-indexed
-      # on change) with a small 4-bit LLM ("<hf repo>::<gguf file>").
-      SYSTEM2_ENABLED: "${SYSTEM2_ENABLED:-true}"
-      SYSTEM2_MODEL: "${SYSTEM2_MODEL:-bartowski/Llama-3.2-3B-Instruct-GGUF::Llama-3.2-3B-Instruct-Q4_K_M.gguf}"
-      KNOWLEDGE_DIR: /workspace/knowledge
+      - TURN_END_PUNCTUATION_MS
+      - TURN_SILENCE_MS
+      - TURN_CONNECTIVE_MS
+      - TURN_CONNECTIVES
+      - LISTENER_MIN_SILENCE_MS
+      - PTT_FINAL_WAIT_MS
+      - CONDUCTOR_RESPONDER
+      - SYSTEM1_MODEL
+      - SYSTEM2_ENABLED
+      - SYSTEM2_MODEL
+      - SYSTEM2_MAX_TOKENS
+      - KNOWLEDGE_EMBED_MODEL
+      - REVIEW_MODEL
+      - REVIEW_UNSURE_BELOW
+      - REVIEW_REPEAT_SIMILARITY
+      - LOG_LEVEL
     volumes:
       - ./knowledge:/workspace/knowledge:ro
       - avatar-run:/run/avatar
@@ -121,117 +133,61 @@ services:
     gpus: all
     ipc: host
     shm_size: 8gb
+    # The avatar's settings, defaults and profiles live in avatar_config.py
+    # (described in CONFIG.md). Compose only passes on what the shell or .env
+    # sets, under the same name; nothing here has a value of its own.
     environment:
-      TTS_URL: "${TTS_URL:-http://127.0.0.1:7860}"
-      AVATAR_PATH: /workspace/inputs/avatar.jpg
-      FLP_CONFIG_PATH: /workspace/FasterLivePortrait/configs/onnx_infer.yaml
-      # v2K publishes each completed FLP frame window immediately instead of
-      # waiting for the complete phrase frame loop. Set false for v2J behavior.
-      INCREMENTAL_FRAME_WINDOWS: "${AVATAR_INCREMENTAL_FRAME_WINDOWS:-true}"
-      # Eight rendered frames represent about 0.64 s at stride 2. Smaller
-      # windows start sooner but provide less protection against GPU jitter.
-      RENDER_WINDOW_FRAMES: "${AVATAR_RENDER_WINDOW_FRAMES:-8}"
-      # v2C-A renders every second 25 FPS motion frame, then WebRTC holds each
-      # rendered frame for the skipped interval. Set 1 for full v2B quality.
-      # v2Q: TensorRT renders 23-35 FPS, so stride 1 (all 25 motion FPS) is
-      # the default; the catch-up stride 2 keeps motion smooth when it dips.
-      RENDER_STRIDE: "${AVATAR_RENDER_STRIDE:-1}"
-      # v2F keeps RENDER_STRIDE for the first phrase / a healthy queue and
-      # switches to CATCHUP_RENDER_STRIDE when less than 0.75 s remains buffered.
-      ADAPTIVE_RENDER_STRIDE: "${AVATAR_ADAPTIVE_RENDER_STRIDE:-true}"
-      CATCHUP_RENDER_STRIDE: "${AVATAR_CATCHUP_RENDER_STRIDE:-2}"
-      CATCHUP_BUFFER_SECONDS: "${AVATAR_CATCHUP_BUFFER_SECONDS:-0.75}"
-      # FLP renders below real time here, so each phrase's speech waits until
-      # duration * (1 - render speed) * safety seconds of video exist. The
-      # mouth then stays in sync without skipping frames, at the cost of a
-      # later start. Render speed starts at EXPECTED_RENDER_FPS and is then
-      # measured. Set false for immediate starts with frame skipping.
-      SPEECH_START_GATE: "${AVATAR_SPEECH_START_GATE:-true}"
-      EXPECTED_RENDER_FPS: "${AVATAR_EXPECTED_RENDER_FPS:-9.0}"
-      SPEECH_START_SAFETY: "${AVATAR_SPEECH_START_SAFETY:-1.15}"
-      # v2M waits for the first video window and a minimum playable buffer
-      # before allowing one future TTS phrase onto the shared laptop GPU.
-      # Set false for serial v2L scheduling; policy=eager restores the old test.
-      TTS_PREFETCH: "${AVATAR_TTS_PREFETCH:-true}"
-      TTS_PREFETCH_POLICY: "${AVATAR_TTS_PREFETCH_POLICY:-adaptive}"
-      TTS_PREFETCH_MIN_BUFFER_SECONDS: "${AVATAR_TTS_PREFETCH_MIN_BUFFER_SECONDS:-0.50}"
-      # Keep FasterLivePortrait's initial driving reference for every phrase
-      # in one utterance. Set false for immediate v2H phrase-reset behavior.
-      PERSISTENT_PHRASE_MOTION: "${AVATAR_PERSISTENT_PHRASE_MOTION:-true}"
-      # Required for FasterLivePortrait to apply its stored first-frame motion
-      # reference. Set false together with persistence for v2H behavior.
-      AVATAR_RELATIVE_MOTION: "${AVATAR_RELATIVE_MOTION:-true}"
-      # Visual-quality controls. `lip` is useful for diagnosing unwanted eye
-      # motion; `all` retains full facial/head animation.
-      AVATAR_ANIMATION_REGION: "${AVATAR_ANIMATION_REGION:-all}"
-      AVATAR_DRIVING_MULTIPLIER: "${AVATAR_DRIVING_MULTIPLIER:-1.0}"
-      AVATAR_NORMALIZE_LIP: "${AVATAR_NORMALIZE_LIP:-true}"
-      AVATAR_EYE_RETARGETING: "${AVATAR_EYE_RETARGETING:-false}"
-      # Scale of JoyVASA's generated eye motion (gaze drift and blinks):
-      # 1.0 = as generated, 0.0 = the portrait's own eyes. 0.3 removes the
-      # staring and winking seen at 1.0 while keeping some eye life.
-      AVATAR_EYE_MOTION_SCALE: "${AVATAR_EYE_MOTION_SCALE:-0.3}"
-      # Scale of JoyVASA's head rotation/translation around the first pose.
-      # At 1.0 the head drifted 1-5 degrees up and rolled, so the avatar
-      # looked above the camera; 0.3 keeps small nods but a level gaze.
-      AVATAR_HEAD_MOTION_SCALE: "${AVATAR_HEAD_MOTION_SCALE:-0.3}"
-      # Shift the mouth against the voice: positive shows it later. JoyVASA's
-      # mouth leads the loudness by ~40-160 ms; +80 felt right in the browser
-      # and made the browser's audio/video buffers nearly equal (53/66 ms).
-      AVATAR_LIP_SYNC_OFFSET_MS: "${AVATAR_LIP_SYNC_OFFSET_MS:-80}"
-      # Inaudible noise instead of digital silence between sentences, so laptop
-      # speaker amplifiers do not power down and clip the next first word.
-      AVATAR_AUDIO_KEEPALIVE_DBFS: "${AVATAR_AUDIO_KEEPALIVE_DBFS:--60}"
-      # FLP rotated the source crop to straighten the face, which tilted the
-      # whole frame and showed black wedges. false keeps the crop upright.
-      AVATAR_CROP_ROTATION: "${AVATAR_CROP_ROTATION:-false}"
-      # How JoyVASA's mouth reaches the portrait. `absolute` uses its mouth
-      # shapes directly (eyes and head stay relative); `relative` applied its
-      # change since the first frame, which pressed this portrait's lips shut.
-      AVATAR_LIP_MOTION_MODE: "${AVATAR_LIP_MOTION_MODE:-absolute}"
-      # Relative mode only: above 1.0 opens the mouth further.
-      AVATAR_LIP_MOTION_SCALE: "${AVATAR_LIP_MOTION_SCALE:-1.0}"
-      # Optional: save every phrase's WAV and JoyVASA motion for offline
-      # analysis, e.g. /workspace/results/motion-dumps. Empty disables it.
-      AVATAR_DEBUG_DUMP_DIR: "${AVATAR_DEBUG_DUMP_DIR:-}"
-      AVATAR_LIP_RETARGETING: "${AVATAR_LIP_RETARGETING:-false}"
-      # Voice modes exposed in the browser:
-      #   design       = Chatterbox's built-in voice
-      #   preset-clone = the voice of the reference recording below
-      TTS_DEFAULT_VOICE_MODE: "${TTS_DEFAULT_VOICE_MODE:-preset-clone}"
-      # An owned/licensed WAV in ./inputs is the cloned voice.
-      # The reference recording without its opening "Hello,": Chatterbox Turbo
-      # continued the reference sentence ("Hello, I am your friendly virtual
-      # assistant...") whenever a reply also started with "Hello".
-      TTS_PRESET_AUDIO_PATH: "${AVATAR_PRESET_AUDIO_PATH:-/workspace/inputs/voice-preset-nohello.wav}"
-      # Show an already-rendered, aligned warm-up frame while idle. The source
-      # photo remains hidden, avoiding the large pose/crop jump at first speech.
-      USE_NEURAL_IDLE_FRAME: "${AVATAR_USE_NEURAL_IDLE_FRAME:-true}"
-      # Frame zero normally has the neutral initial JoyVASA pose. This can be
-      # changed for diagnosis without rebuilding the image.
-      WARMUP_IDLE_FRAME_INDEX: "${AVATAR_WARMUP_IDLE_FRAME_INDEX:-0}"
-      # Phrase splitting: phrase 1 starts playback while later phrases are
-      # generated, so the first one is kept short.
-      PHRASE_FIRST_TARGET_CHARS: "${AVATAR_PHRASE_FIRST_TARGET_CHARS:-48}"
-      MERGE_SHORT_OPENING_PHRASE: "${AVATAR_MERGE_SHORT_OPENING_PHRASE:-true}"
-      PHRASE_MIN_FIRST_CHARS: "${AVATAR_PHRASE_MIN_FIRST_CHARS:-24}"
-      PHRASE_TARGET_CHARS: "${AVATAR_PHRASE_TARGET_CHARS:-100}"
-      PHRASE_MAX_CHARS: "${AVATAR_PHRASE_MAX_CHARS:-160}"
-      # Render warping_spade with ONNX Runtime's TensorRT provider in FP16
-      # (~27 ms vs ~97 ms per frame on the RTX 5080). The first start builds
-      # engines into the cache below (~30 s); later starts reuse them.
-      AVATAR_TENSORRT: "${AVATAR_TENSORRT:-true}"
-      AVATAR_TENSORRT_CACHE: /workspace/trt-cache
-      # Listening: the listener worker's socket. Empty disables listening.
-      LISTENER_SOCKET: "${AVATAR_LISTENER_SOCKET:-/run/avatar/listener.sock}"
-      # The conductor's socket. Empty disables conversation (typed text works).
-      CONDUCTOR_SOCKET: "${AVATAR_CONDUCTOR_SOCKET:-/run/avatar/conductor.sock}"
-      # HTTPS for microphone access from other machines, with a self-signed
-      # certificate for this host's IP addresses (see entrypoint.sh).
-      HTTPS_PORT: "${AVATAR_HTTPS_PORT:-8443}"
-      HTTPS_CERT_DIR: /workspace/certs
-      # For remote/NAT clients, set a TURN server JSON array here.
-      ICE_SERVERS_JSON: "[]"
+      - AVATAR_PROFILE
+      - AVATAR_RENDER_STRIDE
+      - AVATAR_ADAPTIVE_RENDER_STRIDE
+      - AVATAR_CATCHUP_RENDER_STRIDE
+      - AVATAR_CATCHUP_BUFFER_SECONDS
+      - AVATAR_INCREMENTAL_FRAME_WINDOWS
+      - AVATAR_RENDER_WINDOW_FRAMES
+      - AVATAR_SPEECH_START_GATE
+      - AVATAR_SPEECH_START_SAFETY
+      - AVATAR_EXPECTED_RENDER_FPS
+      - AVATAR_TENSORRT
+      - AVATAR_TTS_PREFETCH
+      - AVATAR_TTS_PREFETCH_POLICY
+      - AVATAR_TTS_PREFETCH_MIN_BUFFER_SECONDS
+      - AVATAR_PHRASE_FIRST_TARGET_CHARS
+      - AVATAR_PHRASE_MIN_FIRST_CHARS
+      - AVATAR_PHRASE_TARGET_CHARS
+      - AVATAR_PHRASE_MAX_CHARS
+      - AVATAR_MERGE_SHORT_OPENING_PHRASE
+      - AVATAR_DEFAULT_VOICE_MODE
+      - AVATAR_EYE_MOTION_SCALE
+      - AVATAR_HEAD_MOTION_SCALE
+      - AVATAR_LIP_MOTION_MODE
+      - AVATAR_LIP_MOTION_SCALE
+      - AVATAR_LIP_SYNC_OFFSET_MS
+      - AVATAR_AUDIO_KEEPALIVE_DBFS
+      - AVATAR_DEBUG_DUMP_DIR
+      - AVATAR_PERSISTENT_PHRASE_MOTION
+      - AVATAR_RELATIVE_MOTION
+      - AVATAR_ANIMATION_REGION
+      - AVATAR_DRIVING_MULTIPLIER
+      - AVATAR_NORMALIZE_LIP
+      - AVATAR_EYE_RETARGETING
+      - AVATAR_LIP_RETARGETING
+      - AVATAR_CROP_ROTATION
+      - AVATAR_USE_NEURAL_IDLE_FRAME
+      - AVATAR_WARMUP_IDLE_FRAME_INDEX
+      - AVATAR_IMAGE_PATH
+      - AVATAR_PRESET_AUDIO_PATH
+      - AVATAR_FLP_CONFIG_PATH
+      - AVATAR_RESULTS_ROOT
+      - AVATAR_TENSORRT_CACHE
+      - AVATAR_TTS_URL
+      - AVATAR_LISTENER_SOCKET
+      - AVATAR_CONDUCTOR_SOCKET
+      - AVATAR_PORT
+      - AVATAR_HTTPS_PORT
+      - AVATAR_HTTPS_CERT_DIR
+      - AVATAR_HTTPS_CERT_HOSTS
+      - AVATAR_ICE_SERVERS_JSON
+      - AVATAR_LOG_LEVEL
     volumes:
       - ./inputs:/workspace/inputs:ro
       - ./checkpoints:/workspace/FasterLivePortrait/checkpoints:ro

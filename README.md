@@ -1,15 +1,32 @@
 # Progressive Neural WebRTC Avatar
 
-Current build: `neural-avatar-v2w-jevk5-review`
+Current build: `neural-avatar-v2x-config`
 
-## Configuration
+## v2X one configuration
 
-`CONFIG.md` lists every setting with its default, owner and meaning, and is the
-reference from now on. The configuration is being simplified: Breeze TTS, the
-legacy MP4 render route (`AVATAR_PASTE_BACK`, `DIRECT_MEMORY_RENDER`), the
-voice direction and CFG scales, and several never-varied settings have been
-removed. The sections below are the history of earlier versions and still
-mention them.
+The settings were cleaned up; `CONFIG.md` is the reference.
+
+- The avatar's settings, defaults and profiles are defined once, in
+  `avatar_config.py`. `docker-compose.yml` holds no values; an empty `.env` is
+  the tested live setup. Every setting has one name (`AVATAR_...`), the same
+  in `.env`, the shell and the container.
+- `AVATAR_PROFILE` selects `live` (default), `development`,
+  `benchmark-runtime` or `benchmark-visual`.
+- The avatar refuses to start on an unknown, renamed or removed name, a value
+  out of range or an impossible combination, and lists every problem.
+- `/health`, benchmark results and conversation logs record the profile, the
+  overrides and a configuration hash.
+- Removed: Breeze TTS, the legacy MP4 render route, the voice direction and CFG
+  scales, and several never-varied settings.
+
+```bash
+python3 avatar_config.py show     # effective settings
+tools/run_tests.sh                # avatar tests on the working tree, no rebuild
+tools/config_snapshot.py check    # running stack against config/reference/
+```
+
+The sections below are the history of earlier versions; they still mention
+settings and names that no longer exist.
 
 ## v2W JevK5 and the conversation review
 

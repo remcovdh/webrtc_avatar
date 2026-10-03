@@ -40,7 +40,10 @@ class FrameWindowTests(unittest.TestCase):
         )
 
     def test_v2j_rollback_switch_is_present(self) -> None:
-        self.assertIn('INCREMENTAL_FRAME_WINDOWS = _env_bool(', self.source)
+        self.assertIn(
+            'INCREMENTAL_FRAME_WINDOWS = SETTINGS.incremental_frame_windows',
+            self.source,
+        )
 
 
 if __name__ == "__main__":

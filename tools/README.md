@@ -13,6 +13,7 @@ container are fed through `python -` so nothing needs to be copied in.
 | `transcribe.sh` | What did the avatar really say? (ASR as an "ear") | `tools/transcribe.sh results/some.wav ...` |
 | `eval_system1.py` | How well does a JevK5 model classify 18 Dutch/English utterances? | pause the avatar, then `docker compose run --rm --no-deps -T conductor python - < tools/eval_system1.py` |
 | `eval_system2.py` | Retrieval threshold and LLM answers/speed | pause the avatar, then `docker compose run --rm --no-deps -T conductor python - < tools/eval_system2.py` |
+| `run_tests.sh` | Do the avatar's unit tests pass on the working tree, without rebuilding the image? | `tools/run_tests.sh` (all) or `tools/run_tests.sh test_av_sync.py` |
 | `config_snapshot.py` | Did a change alter the effective configuration (Compose environment per service + `/health` settings)? | `tools/config_snapshot.py check` on the host; `save` records a new reference in `config/reference/` |
 | `../lip_sync_analysis.py` | Does JoyVASA's mouth lead or lag the voice? | see its header |
 

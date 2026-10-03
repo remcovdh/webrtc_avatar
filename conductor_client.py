@@ -20,9 +20,17 @@ LOG = logging.getLogger("conductor")
 
 
 class ConductorClient:
-    def __init__(self, socket_path: str, retry_seconds: float = 3.0) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        retry_seconds: float = 3.0,
+        avatar_config: dict[str, Any] | None = None,
+    ) -> None:
         self.socket_path = socket_path
         self.retry_seconds = retry_seconds
+        # Profile, overrides and hash of the avatar's configuration, so every
+        # conversation log says under which settings it was recorded.
+        self.avatar_config = avatar_config
         self._writer: asyncio.StreamWriter | None = None
         self._output: AvatarOutput | None = None
         self._task: asyncio.Task | None = None
@@ -47,6 +55,8 @@ class ConductorClient:
                 continue
             self._writer = writer
             LOG.info("Connected to the conductor at %s", self.socket_path)
+            if self.avatar_config is not None:
+                await self._send({"type": "avatar_config", **self.avatar_config})
             # A (re)started conductor must know whether the avatar is talking.
             await self._send({"type": "avatar_speaking", "speaking": self._speaking})
             if self._language is not None:

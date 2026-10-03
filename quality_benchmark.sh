@@ -13,16 +13,12 @@ quality_profile="${QUALITY_BENCHMARK_PROFILE:-runtime}"
 build_images="${QUALITY_BENCHMARK_BUILD:-0}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
+# The profiles are defined in avatar_config.py: benchmark-runtime is the live
+# render path with serial TTS, benchmark-visual renders every frame of a whole
+# phrase before playing it.
 case "${quality_profile}" in
-  runtime)
-    render_stride=2
-    adaptive_stride=true
-    incremental_windows=true
-    ;;
-  visual)
-    render_stride=1
-    adaptive_stride=false
-    incremental_windows=false
+  runtime|visual)
+    avatar_profile="benchmark-${quality_profile}"
     ;;
   *)
     echo "[quality] QUALITY_BENCHMARK_PROFILE must be runtime or visual" >&2
@@ -47,7 +43,7 @@ fi
 
 mkdir -p "${host_output}"
 docker compose up -d tts
-echo "[quality] Profile=${quality_profile} stride=${render_stride} adaptive=${adaptive_stride} incremental=${incremental_windows}"
+echo "[quality] Avatar profile ${avatar_profile}"
 
 IFS=';' read -r -a scenarios <<< "${quality_scenarios}"
 for raw_scenario in "${scenarios[@]}"; do
@@ -82,10 +78,7 @@ for raw_scenario in "${scenarios[@]}"; do
   AVATAR_NORMALIZE_LIP="${normalize_lip}" \
   AVATAR_EYE_RETARGETING="${eye_retarget}" \
   AVATAR_LIP_RETARGETING="${lip_retarget}" \
-  AVATAR_RENDER_STRIDE="${render_stride}" \
-  AVATAR_ADAPTIVE_RENDER_STRIDE="${adaptive_stride}" \
-  AVATAR_INCREMENTAL_FRAME_WINDOWS="${incremental_windows}" \
-  AVATAR_TTS_PREFETCH=false \
+  AVATAR_PROFILE="${avatar_profile}" \
     docker compose up -d --force-recreate webrtc-avatar
 
   healthy=0
@@ -107,10 +100,7 @@ for raw_scenario in "${scenarios[@]}"; do
   AVATAR_NORMALIZE_LIP="${normalize_lip}" \
   AVATAR_EYE_RETARGETING="${eye_retarget}" \
   AVATAR_LIP_RETARGETING="${lip_retarget}" \
-  AVATAR_RENDER_STRIDE="${render_stride}" \
-  AVATAR_ADAPTIVE_RENDER_STRIDE="${adaptive_stride}" \
-  AVATAR_INCREMENTAL_FRAME_WINDOWS="${incremental_windows}" \
-  AVATAR_TTS_PREFETCH=false \
+  AVATAR_PROFILE="${avatar_profile}" \
     docker compose config > "${scenario_host}/compose-resolved.yaml"
   curl --fail --silent http://127.0.0.1:8000/health > "${scenario_host}/health.json"
 

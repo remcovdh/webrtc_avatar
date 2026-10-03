@@ -28,6 +28,13 @@ def pcm(seconds: float) -> np.ndarray:
 
 
 class AudioClockedVideoTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The timing below is written for video that is not shifted against
+        # the audio; the offset tests set their own value.
+        original = server.AVATAR_LIP_SYNC_OFFSET_MS
+        server.AVATAR_LIP_SYNC_OFFSET_MS = 0.0
+        self.addCleanup(setattr, server, "AVATAR_LIP_SYNC_OFFSET_MS", original)
+
     def test_buffered_video_plays_every_frame_in_step_with_audio(self) -> None:
         playback = PlaybackBuffer()
         playback.begin()
@@ -181,7 +188,7 @@ class ExpressionMotionScaleTests(unittest.TestCase):
     def test_scales_eye_and_lip_keypoints_independently(self) -> None:
         scaled = server._adjust_driving_motion(
             self.motion, self.reference, eye_scale=0.25, lip_scale=1.5,
-            lip_mode="relative",
+            lip_mode="relative", head_scale=1.0,
         )
         eyes = server.EYE_EXPRESSION_INDICES
         lips = server.LIP_EXPRESSION_INDICES
@@ -197,7 +204,7 @@ class ExpressionMotionScaleTests(unittest.TestCase):
         scale = server._adjust_driving_motion
         self.assertIs(
             scale(self.motion, self.reference, eye_scale=1.0, lip_scale=1.0,
-                  lip_mode="relative"),
+                  lip_mode="relative", head_scale=1.0),
             self.motion,
         )
         self.assertIs(
@@ -229,7 +236,8 @@ class ExpressionMotionScaleTests(unittest.TestCase):
         reference = {"exp": np.full((1, 21, 3), 0.2, dtype=np.float32)}
         driving = {"exp": np.full((1, 21, 3), 0.9, dtype=np.float32)}
         adjusted = server._adjust_driving_motion(
-            driving, reference, source, eye_scale=1.0, lip_mode="absolute"
+            driving, reference, source, eye_scale=1.0, lip_mode="absolute",
+            head_scale=1.0,
         )
         # FLP relative motion: source + (driving - reference).
         animated = source + (adjusted["exp"] - reference["exp"])
