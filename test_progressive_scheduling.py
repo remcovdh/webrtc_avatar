@@ -16,7 +16,6 @@ class ProgressiveSchedulingTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "_split_phrases"
         )
         namespace = {
-            "PROGRESSIVE_PHRASE_MODE": True,
             "PHRASE_FIRST_TARGET_CHARS": 48,
             "PHRASE_TARGET_CHARS": 100,
             "PHRASE_MAX_CHARS": 160,

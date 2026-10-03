@@ -134,12 +134,6 @@ services:
       TTS_URL: "${TTS_URL:-http://127.0.0.1:7860}"
       AVATAR_PATH: /workspace/inputs/avatar.jpg
       FLP_CONFIG_PATH: /workspace/FasterLivePortrait/configs/onnx_infer.yaml
-      # The crop contains the animated face and avoids the per-frame cuSOLVER
-      # matrix inverse used to composite it back into the original photograph.
-      AVATAR_PASTE_BACK: "false"
-      # v2B bypasses FLP's temporary pickle, two MP4 files, two FFmpeg muxes
-      # and the final OpenCV decode. Set false for an immediate v2A.1 rollback.
-      DIRECT_MEMORY_RENDER: "true"
       # v2K publishes each completed FLP frame window immediately instead of
       # waiting for the complete phrase frame loop. Set false for v2J behavior.
       INCREMENTAL_FRAME_WINDOWS: "${AVATAR_INCREMENTAL_FRAME_WINDOWS:-true}"
@@ -246,7 +240,6 @@ services:
       TTS_STARTUP_POLL_SECONDS: "2"
       # Progressive phrase playback: generate phrase 1, start playback, then
       # generate later phrases while the current media queue is consumed.
-      PROGRESSIVE_PHRASE_MODE: "true"
       PHRASE_FIRST_TARGET_CHARS: "${AVATAR_PHRASE_FIRST_TARGET_CHARS:-48}"
       MERGE_SHORT_OPENING_PHRASE: "${AVATAR_MERGE_SHORT_OPENING_PHRASE:-true}"
       PHRASE_MIN_FIRST_CHARS: "${AVATAR_PHRASE_MIN_FIRST_CHARS:-24}"

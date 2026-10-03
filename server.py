@@ -126,8 +126,6 @@ TTS_DEFAULT_VOICE_MODE = os.getenv(
 ).strip().lower()
 TTS_SEED = int(os.getenv("BREEZE_SEED", "42"))
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
-AVATAR_PASTE_BACK = _env_bool("AVATAR_PASTE_BACK", False)
-DIRECT_MEMORY_RENDER = _env_bool("DIRECT_MEMORY_RENDER", True)
 INCREMENTAL_FRAME_WINDOWS = _env_bool("INCREMENTAL_FRAME_WINDOWS", True)
 RENDER_WINDOW_FRAMES = max(1, int(os.getenv("RENDER_WINDOW_FRAMES", "8")))
 RENDER_STRIDE = max(1, int(os.getenv("RENDER_STRIDE", "2")))
@@ -169,7 +167,6 @@ TTS_STARTUP_WAIT_SECONDS = max(
 TTS_STARTUP_POLL_SECONDS = max(
     0.25, float(os.getenv("TTS_STARTUP_POLL_SECONDS", "2"))
 )
-PROGRESSIVE_PHRASE_MODE = _env_bool("PROGRESSIVE_PHRASE_MODE", True)
 TTS_PREFETCH = _env_bool("TTS_PREFETCH", False)
 TTS_PREFETCH_POLICY = os.getenv("TTS_PREFETCH_POLICY", "adaptive").strip().lower()
 if TTS_PREFETCH_POLICY not in {"adaptive", "eager"}:
@@ -441,11 +438,9 @@ def _initialize_pipeline() -> GradioLivePortraitPipeline:
     )
 
     cfg = OmegaConf.load(CONFIG_PATH)
-    # Paste-back invokes torchgeometry's GPU matrix inverse for every frame.
-    # On memory-constrained GPUs shared with TTS, cuSOLVER handle creation can
-    # fail even though motion generation succeeded. The crop output already
-    # contains the complete animated face and is the better WebRTC default.
-    cfg.infer_params.flag_pasteback = AVATAR_PASTE_BACK
+    # The face crop is the output. Pasting it back into the photograph needs
+    # a GPU matrix inverse per frame, which failed on a GPU shared with TTS.
+    cfg.infer_params.flag_pasteback = False
     # Relative motion maps driving deltas onto the source pose. Persistence
     # below then keeps one reference across all phrases in an utterance.
     cfg.infer_params.flag_relative_motion = AVATAR_RELATIVE_MOTION
@@ -529,8 +524,6 @@ def _split_phrases(text: str) -> list[str]:
     normalized = " ".join(text.split())
     if not normalized:
         return []
-    if not PROGRESSIVE_PHRASE_MODE:
-        return [normalized]
 
     phrases: list[str] = []
     current: list[str] = []
@@ -983,52 +976,6 @@ async def _synthesize(
     }
 
 
-def _render_animation_legacy(
-    wav_path: Path,
-    output_dir: Path,
-) -> tuple[list[np.ndarray], float, dict[str, Any]]:
-    """Render through FLP's stock pickle, MP4, FFmpeg and decode path."""
-    if pipeline is None:
-        raise RuntimeError(startup_error or "FasterLivePortrait is not ready")
-
-    render_started = time.perf_counter()
-    original_path, crop_path, reported_elapsed = pipeline.run_audio_driving(
-        str(wav_path), str(AVATAR_PATH), save_dir=str(output_dir)
-    )
-    pipeline_seconds = time.perf_counter() - render_started
-    video_path = original_path if AVATAR_PASTE_BACK else crop_path
-    LOG.info(
-        "Using %s animation output",
-        "full-frame paste-back" if AVATAR_PASTE_BACK else "face crop",
-    )
-    decode_started = time.perf_counter()
-    capture = cv2.VideoCapture(str(video_path))
-    fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
-    frames: list[np.ndarray] = []
-    while capture.isOpened():
-        ok, frame = capture.read()
-        if not ok:
-            break
-        frames.append(_letterbox(frame))
-    capture.release()
-    decode_seconds = time.perf_counter() - decode_started
-    return frames, fps, {
-        "backend": "legacy-mp4",
-        "motion_ms": 0,
-        "frame_loop_ms": 0,
-        "pipeline_ms": round(pipeline_seconds * 1000),
-        "decode_ms": round(decode_seconds * 1000),
-        "total_ms": round((time.perf_counter() - render_started) * 1000),
-        "pipeline_reported_ms": round(float(reported_elapsed or 0) * 1000),
-        "render_stride": 1,
-        "motion_frames": len(frames),
-        "frames": len(frames),
-        "source_fps": round(fps, 3),
-        "playback_fps": round(fps, 3),
-        "effective_fps": 0.0,
-    }
-
-
 def _ensure_joyvasa_pipeline() -> None:
     """Create JoyVASA exactly as FLP's run_audio_driving does."""
     if pipeline is None:
@@ -1117,7 +1064,7 @@ def _dump_motion(wav_path: Path, motion_info: dict[str, Any]) -> None:
     )
 
 
-def _render_animation_direct(
+def _render_animation(
     wav_path: Path,
     render_stride: int | None = None,
     reset_motion_reference: bool = True,
@@ -1274,30 +1221,11 @@ def _render_animation_direct(
     }
 
 
-def _render_animation(
-    wav_path: Path,
-    output_dir: Path,
-    render_stride: int | None = None,
-    reset_motion_reference: bool = True,
-    window_callback: Any | None = None,
-) -> tuple[list[np.ndarray], float, dict[str, Any]]:
-    if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK:
-        return _render_animation_direct(
-            wav_path,
-            render_stride,
-            reset_motion_reference,
-            window_callback,
-        )
-    return _render_animation_legacy(wav_path, output_dir)
-
-
 def _select_render_stride(
     phrase_index: int,
     buffered_seconds: float,
 ) -> tuple[int, str]:
     """Select temporal quality from the buffer state at render start."""
-    if not DIRECT_MEMORY_RENDER or AVATAR_PASTE_BACK:
-        return 1, "legacy-backend"
     if not ADAPTIVE_RENDER_STRIDE or CATCHUP_RENDER_STRIDE == RENDER_STRIDE:
         return RENDER_STRIDE, "fixed"
     if phrase_index == 1:
@@ -1309,7 +1237,6 @@ def _select_render_stride(
 
 async def _render_phrase_in_windows(
     wav_path: Path,
-    chunk_dir: Path,
     selected_stride: int,
     reset_motion_reference: bool,
     pcm: np.ndarray,
@@ -1344,7 +1271,6 @@ async def _render_phrase_in_windows(
         asyncio.to_thread(
             _render_animation,
             wav_path,
-            chunk_dir,
             selected_stride,
             reset_motion_reference,
             publish_window,
@@ -1466,7 +1392,6 @@ async def _prepare_phrase_audio(
     )
     completed = time.perf_counter()
     return {
-        "chunk_dir": chunk_dir,
         "wav_path": wav_path,
         "pcm": pcm,
         "detail": detail,
@@ -1551,7 +1476,6 @@ async def _create_clip(
                     tts_wait_started = time.perf_counter()
                     audio_result = await current_tts_task
                     tts_wait_seconds = time.perf_counter() - tts_wait_started
-                    chunk_dir = audio_result["chunk_dir"]
                     wav_path = audio_result["wav_path"]
                     pcm = audio_result["pcm"]
                     tts_detail = audio_result["detail"]
@@ -1604,16 +1528,11 @@ async def _create_clip(
                         buffer_before_render,
                     )
                     started = time.perf_counter()
-                    incremental = (
-                        INCREMENTAL_FRAME_WINDOWS
-                        and DIRECT_MEMORY_RENDER
-                        and not AVATAR_PASTE_BACK
-                    )
+                    incremental = INCREMENTAL_FRAME_WINDOWS
                     if incremental:
                         media_duration, render_detail, first_window_ms = (
                             await _render_phrase_in_windows(
                                 wav_path,
-                                chunk_dir,
                                 selected_stride,
                                 index == 1 or not PERSISTENT_PHRASE_MOTION,
                                 pcm,
@@ -1642,7 +1561,6 @@ async def _create_clip(
                         frames, fps, render_detail = await asyncio.to_thread(
                             _render_animation,
                             wav_path,
-                            chunk_dir,
                             selected_stride,
                             index == 1 or not PERSISTENT_PHRASE_MOTION,
                         )
@@ -1964,7 +1882,6 @@ async def _warmup_pipeline() -> None:
             frames, fps, render_detail = await asyncio.to_thread(
                 _render_animation,
                 wav_path,
-                warmup_dir,
             )
             if USE_NEURAL_IDLE_FRAME:
                 if not frames:
@@ -2079,24 +1996,12 @@ async def health() -> JSONResponse:
         "onnxruntime_version": ort.__version__,
         "onnx_providers": providers,
         "cuda_provider": "CUDAExecutionProvider" in providers,
-        "paste_back": AVATAR_PASTE_BACK,
-        "direct_memory_render": DIRECT_MEMORY_RENDER,
         "incremental_frame_windows": INCREMENTAL_FRAME_WINDOWS,
         "render_window_frames": RENDER_WINDOW_FRAMES,
-        "render_backend": (
-            "direct-memory"
-            if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK
-            else "legacy-mp4"
-        ),
-        "configured_render_stride": RENDER_STRIDE,
         "adaptive_render_stride": ADAPTIVE_RENDER_STRIDE,
         "catchup_render_stride": CATCHUP_RENDER_STRIDE,
         "catchup_buffer_seconds": CATCHUP_BUFFER_SECONDS,
-        "render_stride": (
-            RENDER_STRIDE
-            if DIRECT_MEMORY_RENDER and not AVATAR_PASTE_BACK
-            else 1
-        ),
+        "render_stride": RENDER_STRIDE,
         "startup_warmup_enabled": STARTUP_WARMUP,
         "startup_warmup_complete": warmup_complete,
         "startup_warmup_seconds": (
@@ -2114,7 +2019,6 @@ async def health() -> JSONResponse:
             if tts_startup_wait_seconds is not None
             else None
         ),
-        "progressive_phrase_mode": PROGRESSIVE_PHRASE_MODE,
         "tts_prefetch": TTS_PREFETCH,
         "tts_prefetch_depth": 1 if TTS_PREFETCH else 0,
         "tts_prefetch_policy": TTS_PREFETCH_POLICY,
